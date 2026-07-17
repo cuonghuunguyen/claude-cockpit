@@ -385,7 +385,16 @@ pub fn dismiss_session(
 /// manually restored for it. Dismissed sessions are excluded from the
 /// active set but remain visible via `list_sessions` (history).
 pub fn rehydrate_active_sessions(conn: &Connection) -> rusqlite::Result<Vec<SessionRow>> {
-    todo!("Task 1 RED: rehydration query not implemented yet")
+    let mut stmt = conn.prepare(
+        "SELECT session_id, cwd, workspace, branch, status, task_summary, current_tool, source,
+                started_at, last_activity_at, ended_at, dismissed_at
+         FROM sessions
+         WHERE status IN ('waiting-permission', 'waiting-input', 'done')
+           AND dismissed_at IS NULL
+         ORDER BY last_activity_at DESC",
+    )?;
+    let rows = stmt.query_map([], row_to_session)?;
+    rows.collect()
 }
 
 /// Lists sessions excluded from `dismissed_at IS NOT NULL` — the active

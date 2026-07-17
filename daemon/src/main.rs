@@ -295,6 +295,19 @@ async fn main() {
     let db_path = dir.join("cockpit.db");
     let conn = store::open_db(&db_path).expect("failed to open cockpit.db (WAL)");
 
+    // Startup rehydration (FND-03/D-07): log what would repopulate the
+    // active queue after this restart. The daemon has no separate
+    // in-memory session cache — GET /sessions(?active=true) and /events
+    // always read straight from this same SQLite connection, so once WAL
+    // persistence has the row, rehydration is automatic; this call exists
+    // to prove/verify the specific unresolved+undismissed query on every
+    // startup and surface the count for operators.
+    let rehydrated = store::rehydrate_active_sessions(&conn).unwrap_or_default();
+    println!(
+        "cockpit-daemon rehydrated {} unresolved session(s) from a prior run",
+        rehydrated.len()
+    );
+
     let db_tx = spawn_db_writer(conn);
     let (event_tx, _rx) = broadcast::channel::<String>(256);
 

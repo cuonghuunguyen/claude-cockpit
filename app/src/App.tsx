@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Session } from "../../shared/types";
+import { NotificationSettings } from "./NotificationSettings";
 import { OfflineBanner } from "./OfflineBanner";
 import { Queue } from "./Queue";
 import { SessionCard } from "./SessionCard";
@@ -129,6 +130,7 @@ function App() {
       <h1>Claude Cockpit</h1>
       {loadError && <p className="dashboard-warning">{loadError}</p>}
       <OfflineBanner />
+      <NotificationSettings />
       <Queue sessions={active} onDismiss={handleDismiss} />
 
       <section className="history-section">

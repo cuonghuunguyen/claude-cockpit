@@ -23,6 +23,7 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-notification = "2.3.3"
+tauri-plugin-store = "2"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls"] }
 # StreamExt::next() for consuming reqwest's SSE byte stream from the daemon
 # (daemon_client.rs). axum/reqwest don't publicly re-export the Stream

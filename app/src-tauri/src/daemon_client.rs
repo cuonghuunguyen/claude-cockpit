@@ -18,6 +18,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_store::StoreExt;
 
 /// Fixed daemon base URL — mirrors `shared/types.ts`'s `COCKPIT_DAEMON_BASE_URL`.
 /// Both native-Windows and WSL-origin traffic reach the daemon at this
@@ -130,10 +131,10 @@ fn toast_title(status: &str) -> &'static str {
 /// plain-text-interpolation discipline (T-01-05f) and capping the toast to
 /// already-trusted, already-escaped daemon-derived fields (T-02-02-01).
 ///
-/// All three notifiable statuses fire unconditionally in Task 1 (D-05:
-/// default-ON); Task 2 adds a settings-store gate for `waiting-input` and
-/// `done` only — `waiting-permission` must never consult the store at all
-/// (NOT-03, Pitfall 2).
+/// All three notifiable statuses fire unconditionally in `should_notify`
+/// (D-05: default-ON); [`notification_enabled`] then applies the D-06
+/// settings gate for `waiting-input`/`done` only — `waiting-permission`
+/// never consults the store at all (NOT-03, Pitfall 2).
 fn maybe_fire_notification(app: &AppHandle, value: &Value) {
     let (Some(session_id), Some(status)) = (
         value.get("sessionId").and_then(Value::as_str),
@@ -144,6 +145,10 @@ fn maybe_fire_notification(app: &AppHandle, value: &Value) {
 
     let notif_state = app.state::<NotificationState>();
     if !should_notify(notif_state.inner(), session_id, status) {
+        return;
+    }
+
+    if !notification_enabled(app, status) {
         return;
     }
 
@@ -173,6 +178,46 @@ fn maybe_fire_notification(app: &AppHandle, value: &Value) {
 
     if let Err(err) = result {
         eprintln!("cockpit: failed to fire notification for session {session_id}: {err}");
+    }
+}
+
+/// `tauri-plugin-store` file name — shared contract with
+/// `NotificationSettings.tsx`'s `load("settings.json")` call (D-06). One
+/// store file, one set of key names, one source of truth.
+const SETTINGS_STORE_FILE: &str = "settings.json";
+
+/// D-06 settings gate for `waiting-input`/`done` notifications, structurally
+/// bypassed for `waiting-permission` (NOT-03, Pitfall 2): the permission
+/// case returns `true` before this function's body ever touches the store
+/// (see the `_ => return true` arm below), so there is no code path by
+/// which a settings-store edit or a toggle bug can suppress a permission
+/// notification.
+///
+/// Fails OPEN to firing (returns `true`) if the store can't be opened or
+/// the key is absent/unset — a missing/corrupt settings file must never
+/// silently swallow a notification the user would otherwise expect
+/// (T-02-02-02 residual-risk mitigation), matching this file's established
+/// log-and-degrade convention for fallible I/O.
+fn notification_enabled(app: &AppHandle, status: &str) -> bool {
+    let key = match status {
+        "waiting-input" => "notify_input_enabled",
+        "done" => "notify_done_enabled",
+        // waiting-permission (or anything else reaching this point) is
+        // structurally un-suppressible — no store read at all.
+        _ => return true,
+    };
+
+    match app.store(SETTINGS_STORE_FILE) {
+        Ok(store) => store
+            .get(key)
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true),
+        Err(err) => {
+            eprintln!(
+                "cockpit: failed to open {SETTINGS_STORE_FILE} for notification gate, firing anyway: {err}"
+            );
+            true
+        }
     }
 }
 

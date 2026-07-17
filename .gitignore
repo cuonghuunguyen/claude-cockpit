@@ -1,0 +1,23 @@
+# Rust
+/target/
+daemon/target/
+app/src-tauri/target/
+
+# Node
+node_modules/
+app/node_modules/
+
+# Frontend build output
+app/dist/
+
+# Tauri gitignore (kept in app/src-tauri/.gitignore too; duplicated here for
+# repo-root tooling that runs outside app/)
+app/src-tauri/gen/
+
+# Editor / OS
+.DS_Store
+*.swp
+
+# Cockpit runtime data (never committed — lives under the WSL user's home,
+# outside the repo, but ignored here defensively in case a dev symlinks it in)
+.cockpit/

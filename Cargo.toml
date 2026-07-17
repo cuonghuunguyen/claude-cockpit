@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["daemon", "app/src-tauri"]
+
+# NOTE: `app/src-tauri` requires Linux WebKit/GTK dev libraries to compile.
+# On a WSL/Ubuntu dev machine without those libraries installed, build the
+# daemon alone:
+#   cargo build --manifest-path daemon/Cargo.toml
+# A bare `cargo build` at the workspace root will attempt to compile
+# `app/src-tauri` too and fail with missing-library errors on such a machine.
+# The Tauri app is compiled and visually verified on the Windows side.

@@ -5,6 +5,7 @@
 //! filesystem, and wires the token-gated ingest routes.
 
 mod auth;
+mod events_sse;
 mod ingest;
 mod store;
 
@@ -106,10 +107,12 @@ fn set_owner_only_permissions(_path: &std::path::Path) -> std::io::Result<()> {
 /// data); every other route requires the per-install token (FND-05), and
 /// this daemon emits no permissive CORS headers on any route.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let protected = ingest::routes().layer(axum::middleware::from_fn_with_state(
-        state.clone(),
-        auth::require_token,
-    ));
+    let protected = ingest::routes()
+        .merge(events_sse::routes())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_token,
+        ));
 
     Router::new()
         .route("/health", get(|| async { "ok" }))
@@ -300,5 +303,54 @@ mod tests {
             .await
             .expect("GET /sessions without token");
         assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn events_sse_is_token_gated_and_streams_session_start() {
+        use futures_util::StreamExt;
+
+        let token = "sse-test-token-0123456789abcdef0123456789";
+        let base = spawn_test_daemon(token).await;
+        let client = reqwest::Client::new();
+
+        // No token -> 401 (SSE endpoint is behind the same auth middleware).
+        let resp = client
+            .get(format!("{base}/events"))
+            .send()
+            .await
+            .expect("GET /events without token");
+        assert_eq!(resp.status(), 401);
+
+        // Valid token -> 200, and a subsequent session-start is streamed.
+        let resp = client
+            .get(format!("{base}/events"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .expect("GET /events with token");
+        assert_eq!(resp.status(), 200);
+
+        let mut stream = resp.bytes_stream();
+
+        // Give the SSE subscriber a moment to register before publishing.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        client
+            .post(format!("{base}/hooks/session-start"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({"session_id": "sse1", "cwd": "/tmp/z", "source": "startup"}))
+            .send()
+            .await
+            .expect("POST session-start to trigger SSE frame");
+
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("SSE frame did not arrive within 5s")
+            .expect("SSE stream ended unexpectedly")
+            .expect("SSE stream chunk error");
+        let text = String::from_utf8_lossy(&frame);
+        assert!(
+            text.contains("sse1"),
+            "expected the session-start SSE frame to mention session_id sse1, got: {text}"
+        );
     }
 }

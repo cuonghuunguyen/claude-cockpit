@@ -20,18 +20,40 @@ pub fn run() {
             daemon_client::get_session_events
         ])
         .setup(|app| {
-            // The Tauri Rust backend is the sole daemon client (SKELETON.md):
-            // read the per-install token here, hand it only to Rust command
-            // handlers via managed state, and keep the SSE consumer's
-            // re-emitted events as the webview's only path to daemon data.
-            let token = daemon_client::read_token()
-                .map_err(|e| format!("cockpit: failed to read daemon token via wsl.exe: {e}"))?;
-            app.manage(TokenState(token.clone()));
             // Reachability state drives the tray watching/not-watching
             // indicator and the offline-window banner event (D-13),
-            // updated as the SSE consumer connects/reconnects below.
+            // updated as the SSE consumer connects/reconnects below. Managed
+            // eagerly (before the token is available) so `mark_unreachable`
+            // has somewhere to record state while we're still waiting on WSL.
             app.manage(ReachabilityState::new());
-            daemon_client::spawn_sse_consumer(app.handle().clone(), token);
+
+            // WR-01 fix: `read_token()` shells out to `wsl.exe`, which can
+            // block for many seconds on a cold WSL2 VM boot. Running that
+            // synchronously inside `setup()` would freeze the whole Tauri
+            // main thread before the window even finishes initializing, and
+            // a failure here would propagate via `?` and abort app startup
+            // entirely. Instead, do the read on a blocking task off the
+            // async runtime's worker threads, and degrade gracefully (log +
+            // leave `TokenState` unmanaged) rather than crashing the app if
+            // it fails — the daemon-dependent Tauri commands already return
+            // `Result`, so an unmanaged `TokenState` will surface as a
+            // normal per-call error instead of a fatal startup failure.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let token = tauri::async_runtime::spawn_blocking(daemon_client::read_token)
+                    .await
+                    .expect("read_token blocking task panicked");
+                match token {
+                    Ok(token) => {
+                        handle.manage(TokenState(token.clone()));
+                        daemon_client::spawn_sse_consumer(handle.clone(), token);
+                    }
+                    Err(e) => {
+                        eprintln!("cockpit: failed to read daemon token via wsl.exe: {e}");
+                    }
+                }
+            });
+
             Ok(())
         })
         .run(tauri::generate_context!())

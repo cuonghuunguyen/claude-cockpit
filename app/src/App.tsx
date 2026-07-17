@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Session } from "../../shared/types";
+import { focusTargetExists } from "./focus";
 import { NotificationSettings } from "./NotificationSettings";
 import { OfflineBanner } from "./OfflineBanner";
 import { Queue } from "./Queue";
@@ -15,6 +17,20 @@ import "./styles.css";
  * SKELETON.md's "GUI ↔ daemon transport" decision).
  */
 const SESSION_EVENT_NAME = "cockpit://session-event";
+
+/**
+ * Tauri event carrying `{ sessionId }`, emitted whenever the D-10
+ * window-focus + scroll-to-card + highlight mechanism should run (Plan
+ * 02-03). Today nothing on the locked `tauri-plugin-notification` desktop
+ * backend can emit this from a real toast click (see `daemon_client.rs`'s
+ * `maybe_fire_notification` doc comment and 02-03-SUMMARY.md) — this event
+ * is the invokable mechanism's entry point, ready for whatever future
+ * native-activation path becomes available.
+ */
+const FOCUS_SESSION_EVENT_NAME = "cockpit://focus-session";
+
+/** How long a card stays highlighted before the highlight self-clears. */
+const HIGHLIGHT_DURATION_MS = 2000;
 
 /** Upsert a single live-updated session into the current list by `sessionId`. */
 function upsert(prev: Session[], updated: Session): Session[] {
@@ -57,6 +73,7 @@ function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [highlightedSessionId, setHighlightedSessionId] = useState<string | null>(null);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -101,6 +118,61 @@ function App() {
     };
   }, []);
 
+  // Kept in sync with `sessions` on every render so the focus-session
+  // listener below (subscribed once, empty deps) always checks
+  // `focusTargetExists` against the *current* session list rather than the
+  // stale snapshot captured when the listener was first registered.
+  const sessionsRef = useRef<Session[]>(sessions);
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    let clearHighlightTimer: ReturnType<typeof setTimeout> | undefined;
+
+    listen<{ sessionId: string }>(FOCUS_SESSION_EVENT_NAME, (event) => {
+      const { sessionId } = event.payload;
+
+      // Bring the window forward unconditionally (D-10 part a: "works
+      // whenever it is invoked") — this happens regardless of whether the
+      // target session still exists in the current list.
+      const win = getCurrentWindow();
+      win
+        .unminimize()
+        .then(() => win.show())
+        .then(() => win.setFocus())
+        .catch((err) => {
+          console.error("cockpit: failed to focus window for session", sessionId, err);
+        });
+
+      if (!focusTargetExists(sessionId, sessionsRef.current)) {
+        // Unknown/stale session id: safe no-op — no crash, no wrong-card
+        // highlight (D-10 truth).
+        return;
+      }
+
+      setHighlightedSessionId(sessionId);
+      if (clearHighlightTimer) clearTimeout(clearHighlightTimer);
+      clearHighlightTimer = setTimeout(() => {
+        setHighlightedSessionId(null);
+      }, HIGHLIGHT_DURATION_MS);
+    }).then((fn) => {
+      if (cancelled) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      if (clearHighlightTimer) clearTimeout(clearHighlightTimer);
+    };
+  }, []);
+
   /**
    * Optimistic dismiss (D-06): the daemon's `dismiss_session` call already
    * succeeded by the time `SessionCard` invokes this (see
@@ -131,7 +203,11 @@ function App() {
       {loadError && <p className="dashboard-warning">{loadError}</p>}
       <OfflineBanner />
       <NotificationSettings />
-      <Queue sessions={active} onDismiss={handleDismiss} />
+      <Queue
+        sessions={active}
+        onDismiss={handleDismiss}
+        highlightedSessionId={highlightedSessionId}
+      />
 
       <section className="history-section">
         <button

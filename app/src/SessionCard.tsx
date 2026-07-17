@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Session } from "../../shared/types";
 import { formatRelativeTime, pendingAskHeadline, statusLabel } from "./format";
@@ -18,6 +18,14 @@ interface SessionCardProps {
    * active response moment), but the expandable timeline still works.
    */
   historical?: boolean;
+  /**
+   * `true` when a `cockpit://focus-session` event most recently targeted
+   * this card (D-10, via `Queue`'s `isHighlighted`). Scrolls the card into
+   * view and applies `.session-card-highlighted`; the highlight is
+   * transient — `App.tsx` clears it via a self-clearing timeout, this
+   * component only reacts to the prop.
+   */
+  highlighted?: boolean;
 }
 
 /**
@@ -37,10 +45,22 @@ interface SessionCardProps {
  * default; no raw-HTML sink is used anywhere in this component
  * (T-01-05f).
  */
-export function SessionCard({ session, onDismiss, historical = false }: SessionCardProps) {
+export function SessionCard({
+  session,
+  onDismiss,
+  historical = false,
+  highlighted = false,
+}: SessionCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [dismissing, setDismissing] = useState(false);
   const [dismissError, setDismissError] = useState<string | null>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (highlighted) {
+      cardRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [highlighted]);
 
   const headline = historical ? null : pendingAskHeadline(session);
 
@@ -66,11 +86,13 @@ export function SessionCard({ session, onDismiss, historical = false }: SessionC
 
   return (
     <div
+      ref={cardRef}
       className={
         "session-card" +
         ` session-card-status-${session.status}` +
         (headline ? " session-card-attention" : "") +
-        (historical ? " session-card-historical" : "")
+        (historical ? " session-card-historical" : "") +
+        (highlighted ? " session-card-highlighted" : "")
       }
       data-testid="session-card"
     >

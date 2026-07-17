@@ -146,6 +146,16 @@
   opacity: 0.7;
 }
 
+/* D-10: transient highlight applied by a cockpit://focus-session event —
+   self-clears after a short interval (see App.tsx), so this must read as a
+   brief pulse, not a permanent state. */
+.session-card-highlighted {
+  outline: 2px solid #6b8fd6;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(107, 143, 214, 0.2);
+  transition: box-shadow 0.2s ease-out;
+}
+
 .session-card-headline {
   font-size: 1.05rem;
   font-weight: 700;
@@ -334,6 +344,11 @@
   .session-card-attention {
     background: #2a2517;
     border-color: #5a4a1e;
+  }
+
+  .session-card-highlighted {
+    outline-color: #8fabe8;
+    box-shadow: 0 0 0 4px rgba(143, 171, 232, 0.25);
   }
 
   .session-card-meta {

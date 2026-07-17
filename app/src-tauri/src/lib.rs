@@ -1,6 +1,6 @@
 mod daemon_client;
 
-use daemon_client::TokenState;
+use daemon_client::{ReachabilityState, TokenState};
 use tauri::Manager;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -27,6 +27,10 @@ pub fn run() {
             let token = daemon_client::read_token()
                 .map_err(|e| format!("cockpit: failed to read daemon token via wsl.exe: {e}"))?;
             app.manage(TokenState(token.clone()));
+            // Reachability state drives the tray watching/not-watching
+            // indicator and the offline-window banner event (D-13),
+            // updated as the SSE consumer connects/reconnects below.
+            app.manage(ReachabilityState::new());
             daemon_client::spawn_sse_consumer(app.handle().clone(), token);
             Ok(())
         })

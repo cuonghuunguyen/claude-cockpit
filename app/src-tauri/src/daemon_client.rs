@@ -182,10 +182,6 @@ async fn consume_events_once(app: &AppHandle, token: &str) -> Result<(), String>
         return Err(format!("daemon GET /events returned {}", resp.status()));
     }
 
-    // Connection established: the daemon is reachable (D-13 tray indicator
-    // + offline-window banner on reconnect, D-12 no per-session forensics).
-    mark_reachable(app, app.state::<ReachabilityState>().inner());
-
     let mut stream = resp.bytes_stream();
     // WR-03 fix: accumulate raw bytes rather than decoding each network
     // chunk independently with `from_utf8_lossy`. Chunk boundaries are
@@ -195,9 +191,25 @@ async fn consume_events_once(app: &AppHandle, token: &str) -> Result<(), String>
     // Decoding is deferred until a complete frame (delimited by the ASCII
     // "\n\n" sequence, safe to search for in raw bytes) has been assembled.
     let mut buf: Vec<u8> = Vec::new();
+    // WR-06 fix: only flip reachability to "watching" once at least one
+    // chunk has actually arrived on this connection. Previously
+    // `mark_reachable` fired right after the handshake succeeded, before
+    // ever reading from the stream — if the daemon accepted the connection
+    // and then immediately closed it (no chunks, `Ok(())` below), the
+    // reconnect loop in `spawn_sse_consumer` never saw an `Err` and so
+    // never called `mark_unreachable`, leaving the tray/offline-banner
+    // logic stuck reporting "watching" during a flapping-daemon scenario.
+    let mut received_any = false;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| e.to_string())?;
+        if !received_any {
+            received_any = true;
+            // Connection established AND actually streaming (D-13 tray
+            // indicator + offline-window banner on reconnect, D-12 no
+            // per-session forensics).
+            mark_reachable(app, app.state::<ReachabilityState>().inner());
+        }
         buf.extend_from_slice(&chunk);
 
         // SSE frames are separated by a blank line ("\n\n").
@@ -212,7 +224,11 @@ async fn consume_events_once(app: &AppHandle, token: &str) -> Result<(), String>
         }
     }
 
-    Ok(())
+    if received_any {
+        Ok(())
+    } else {
+        Err("daemon closed /events stream without sending any data".to_string())
+    }
 }
 
 /// Finds the byte offset of the first `"\n\n"` frame delimiter in `buf`, if

@@ -55,34 +55,46 @@ export function pendingAskHeadline(session: Session): string | null {
 }
 
 /**
- * Sort weight used by `compareSessions` (D-04): sessions whose status is
- * waiting-permission / waiting-input / done are bucketed above a plain
- * `running` session. Within a bucket, `compareSessions` falls back to
- * `lastActivityAt` (most-recent-first).
- *
- * This is a deliberate Phase-1 placeholder — the real attention-ranking
- * (blocked-on-permission > waiting-input > done > running, longest-waiting
- * first) is Phase 2 (QUE-01/02); do not extend this beyond the two-bucket
- * model described in 01-CONTEXT.md D-04.
+ * Tier order for `compareSessions` (D-01): index 0 is the highest-priority
+ * tier. Attention-needing statuses (waiting-permission, waiting-input, done)
+ * rank above the plain `running` tier; within the attention tiers,
+ * waiting-permission ranks above waiting-input, which ranks above done.
+ * This is the Phase 2 4-tier model (D-01..D-04) that replaces Phase 1's
+ * 2-bucket placeholder ordering (D-04) — do NOT add a 5th "idle" tier
+ * or a time-based demotion; see 02-CONTEXT.md D-01.
  */
-function sortBucket(status: SessionStatus): number {
-  return isAttentionStatus(status) ? 0 : 1;
+const TIER_ORDER: SessionStatus[] = [
+  "waiting-permission",
+  "waiting-input",
+  "done",
+  "running",
+];
+
+/** Returns the tier index (0..3, lower = higher priority) for a status. */
+function tierIndex(status: SessionStatus): number {
+  return TIER_ORDER.indexOf(status);
 }
 
 /**
- * Phase-1 ordering comparator (D-04): bucket first (attention-needing above
- * running), most-recent `lastActivityAt` as the tiebreaker/fallback within a
- * bucket. Deliberately does NOT look at timeline/error data at all — an
- * error event only ever bumps a session's `lastActivityAt` (a same-bucket
- * tiebreaker signal), it can never move a `running` session above a
- * waiting/done one (D-10/MON-05: errors never reorder the queue into or out
- * of the attention bucket).
+ * Phase 2 ordering comparator (D-01..D-04): tier index first (waiting-
+ * permission > waiting-input > done > running), then an asymmetric
+ * `lastActivityAt` tiebreak per tier — oldest-first within the three
+ * attention tiers (the longest-waiting session leads, D-03), newest-first
+ * within `running` (the most recently active session leads, D-04).
+ * Deliberately does NOT look at timeline/error data at all — an error event
+ * only ever bumps a session's `lastActivityAt` (a same-tier tiebreaker
+ * signal), it can never move a `running` session above a waiting/done one
+ * (D-10/MON-05: errors never reorder the queue across tiers).
  */
 export function compareSessions(a: Session, b: Session): number {
-  const bucketDiff = sortBucket(a.status) - sortBucket(b.status);
-  if (bucketDiff !== 0) return bucketDiff;
-  // Most-recent activity first within the same bucket.
-  return b.lastActivityAt.localeCompare(a.lastActivityAt);
+  const tierDiff = tierIndex(a.status) - tierIndex(b.status);
+  if (tierDiff !== 0) return tierDiff;
+  if (a.status === "running") {
+    // Running tier: most-recent activity first (D-04).
+    return b.lastActivityAt.localeCompare(a.lastActivityAt);
+  }
+  // Attention tiers: oldest (longest-waiting) activity first (D-03/D-04).
+  return a.lastActivityAt.localeCompare(b.lastActivityAt);
 }
 
 /** Returns a new, ordered array — never mutates `sessions` (D-04). */

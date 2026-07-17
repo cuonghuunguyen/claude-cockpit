@@ -15,6 +15,34 @@ import "./styles.css";
  */
 const SESSION_EVENT_NAME = "cockpit://session-event";
 
+/** Upsert a single live-updated session into the current list by `sessionId`. */
+function upsert(prev: Session[], updated: Session): Session[] {
+  const idx = prev.findIndex((s) => s.sessionId === updated.sessionId);
+  if (idx === -1) return [...prev, updated];
+  const next = [...prev];
+  next[idx] = updated;
+  return next;
+}
+
+/**
+ * Merge the `get_sessions` snapshot into the current (possibly already
+ * live-updated) state without clobbering anything newer (WR-02). For each
+ * session in the snapshot: if a live update for that same session already
+ * landed in `prev` with a strictly newer `lastActivityAt`, keep the live
+ * version; otherwise take the snapshot's version. Sessions present only in
+ * `prev` (a live event for a session not yet in the snapshot) are preserved.
+ */
+function mergeSnapshotKeepingNewer(prev: Session[], snapshot: Session[]): Session[] {
+  const byId = new Map(prev.map((s) => [s.sessionId, s] as const));
+  for (const incoming of snapshot) {
+    const existing = byId.get(incoming.sessionId);
+    if (!existing || existing.lastActivityAt <= incoming.lastActivityAt) {
+      byId.set(incoming.sessionId, incoming);
+    }
+  }
+  return Array.from(byId.values());
+}
+
 /**
  * The response-oriented queue-of-cards dashboard (Plan 01-05, D-01..D-10).
  *
@@ -33,35 +61,38 @@ function App() {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
 
-    invoke<Session[]>("get_sessions")
-      .then((initial) => {
-        if (!cancelled) setSessions(initial);
-      })
-      .catch((err) => {
+    async function bootstrap() {
+      // WR-02 fix: subscribe *before* fetching the snapshot so no live
+      // `cockpit://session-event` emitted while `get_sessions` is still
+      // in flight is lost (Tauri's emit/listen has no event replay).
+      unlisten = await listen<Session>(SESSION_EVENT_NAME, (event) => {
+        const updated = event.payload;
+        setSessions((prev) => upsert(prev, updated));
+      });
+
+      if (cancelled) {
+        unlisten();
+        return;
+      }
+
+      try {
+        const initial = await invoke<Session[]>("get_sessions");
+        if (cancelled) return;
+        // Merge, don't overwrite: any session already updated live (via an
+        // event that arrived before this slower HTTP round-trip resolved)
+        // must not be clobbered by the now-stale snapshot for that session.
+        setSessions((prev) => mergeSnapshotKeepingNewer(prev, initial));
+      } catch (err) {
         console.error("cockpit: failed to load initial sessions", err);
         if (!cancelled) {
           setLoadError(
             "Could not reach the Cockpit daemon yet — waiting for live updates.",
           );
         }
-      });
-
-    listen<Session>(SESSION_EVENT_NAME, (event) => {
-      const updated = event.payload;
-      setSessions((prev) => {
-        const idx = prev.findIndex((s) => s.sessionId === updated.sessionId);
-        if (idx === -1) return [...prev, updated];
-        const next = [...prev];
-        next[idx] = updated;
-        return next;
-      });
-    }).then((fn) => {
-      if (cancelled) {
-        fn();
-      } else {
-        unlisten = fn;
       }
-    });
+    }
+
+    bootstrap();
 
     return () => {
       cancelled = true;

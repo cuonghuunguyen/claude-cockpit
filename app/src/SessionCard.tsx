@@ -1,38 +1,61 @@
 import type { Session } from "../../shared/types";
+import { formatRelativeTime, pendingAskHeadline, statusLabel } from "./format";
 
 interface SessionCardProps {
   session: Session;
 }
 
 /**
- * Minimal live session card — Phase 1, Plan 01-02 (Walking Skeleton part B).
+ * Response-surface session card (D-01..D-05, D-08).
  *
- * This proves one card renders and updates live from a daemon-pushed Tauri
- * event (MON-01, MON-04). The response-oriented card hierarchy (pending-ask
- * headline, condensed timeline, workspace·branch — D-01..D-11) is designed
- * in Plan 01-05; this component intentionally stays minimal until then.
+ * The card face always shows status, workspace·branch (MON-02), current
+ * tool (only meaningful while `running`), last-activity relative time, and
+ * the task-summary line (D-08). When the session is blocked or done, the
+ * pending-ask headline (D-02) is rendered above everything else and takes
+ * visual priority over the status/tool line — done stays visually
+ * prominent until dismissed (D-05).
  *
- * `workspace`/`branch`/`currentTool` may render as "unknown" for now — their
- * derivation from `cwd` (MON-02) is out of this plan's scope (see
- * `daemon/src/store.rs`'s `SessionApi` doc comment).
+ * Expand-to-timeline and dismiss-to-history (D-06, D-09) are added in
+ * Task 2 of this plan.
+ *
+ * All session-derived text (task summary, tool name, workspace/branch) is
+ * rendered through plain JSX text interpolation only — React escapes it by
+ * default; no raw-HTML sink is used anywhere in this component
+ * (T-01-05f).
  */
 export function SessionCard({ session }: SessionCardProps) {
+  const headline = pendingAskHeadline(session);
+
   return (
-    <div className="session-card" data-testid="session-card">
-      <div className="session-card-status">{session.status}</div>
-      <div className="session-card-workspace">
-        {session.workspace ?? "(workspace unknown)"}
-        {session.branch ? ` · ${session.branch}` : ""}
+    <div
+      className={
+        "session-card" +
+        ` session-card-status-${session.status}` +
+        (headline ? " session-card-attention" : "")
+      }
+      data-testid="session-card"
+    >
+      {headline && <div className="session-card-headline">{headline}</div>}
+
+      <div className="session-card-meta">
+        <span className={`status-badge status-badge-${session.status}`}>
+          {statusLabel(session.status)}
+        </span>
+        <span className="session-card-workspace">
+          {session.workspace ?? "unknown workspace"}
+          {session.branch ? ` · ${session.branch}` : ""}
+        </span>
+        {session.status === "running" && session.currentTool && (
+          <span className="session-card-tool">{session.currentTool}</span>
+        )}
+        <span className="session-card-activity">
+          {formatRelativeTime(session.lastActivityAt)}
+        </span>
       </div>
+
       {session.taskSummary && (
         <div className="session-card-summary">{session.taskSummary}</div>
       )}
-      {session.currentTool && (
-        <div className="session-card-tool">tool: {session.currentTool}</div>
-      )}
-      <div className="session-card-activity">
-        last activity: {session.lastActivityAt}
-      </div>
     </div>
   );
 }

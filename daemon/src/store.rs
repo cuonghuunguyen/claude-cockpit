@@ -442,4 +442,97 @@ mod tests {
         // 2024-01-01T00:00:00.000Z
         assert_eq!(millis_to_rfc3339(1_704_067_200_000), "2024-01-01T00:00:00.000Z");
     }
+
+    fn test_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                session_id TEXT PRIMARY KEY,
+                cwd TEXT,
+                workspace TEXT,
+                branch TEXT,
+                status TEXT NOT NULL,
+                task_summary TEXT,
+                current_tool TEXT,
+                source TEXT,
+                started_at INTEGER,
+                last_activity_at INTEGER,
+                ended_at INTEGER NULL,
+                dismissed_at INTEGER NULL
+            );
+            CREATE TABLE events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                tool_name TEXT,
+                summary TEXT,
+                payload_json TEXT,
+                is_error INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );",
+        )
+        .expect("create schema");
+        conn
+    }
+
+    #[test]
+    fn set_task_summary_if_absent_is_idempotent() {
+        let conn = test_db();
+        ensure_session(&conn, "s1", None).unwrap();
+        set_task_summary_if_absent(&conn, "s1", "first prompt").unwrap();
+        set_task_summary_if_absent(&conn, "s1", "a totally different second prompt").unwrap();
+        let row = get_session(&conn, "s1").unwrap().unwrap();
+        assert_eq!(row.task_summary.as_deref(), Some("first prompt"));
+    }
+
+    #[test]
+    fn derive_workspace_and_branch_plain_posix_path() {
+        let (workspace, branch) = derive_workspace_and_branch("/some/repo");
+        assert_eq!(workspace.as_deref(), Some("repo"));
+        // No real .git dir at this path in the test environment -> None,
+        // never a panic.
+        assert_eq!(branch, None);
+    }
+
+    #[test]
+    fn derive_workspace_and_branch_normalizes_native_windows_path() {
+        // Must not panic on a native-Windows cwd, and must still extract a
+        // sane workspace name after /mnt/<drive>/... normalization.
+        let (workspace, branch) = derive_workspace_and_branch(r"C:\Users\x\proj");
+        assert_eq!(workspace.as_deref(), Some("proj"));
+        assert_eq!(branch, None); // no real .git at /mnt/c/Users/x/proj here
+    }
+
+    #[test]
+    fn derive_workspace_and_branch_empty_cwd_is_none() {
+        assert_eq!(derive_workspace_and_branch(""), (None, None));
+    }
+
+    #[test]
+    fn appending_error_event_leaves_session_status_unchanged() {
+        let conn = test_db();
+        ensure_session(&conn, "s1", None).unwrap();
+        update_session_status(&conn, "s1", "done", None).unwrap();
+        append_event(&conn, "s1", "error", None, "boom", None, true).unwrap();
+        let row = get_session(&conn, "s1").unwrap().unwrap();
+        assert_eq!(row.status, "done", "an is_error event must never change status (D-10/MON-05)");
+    }
+
+    #[test]
+    fn dismiss_session_excludes_from_active_but_keeps_in_full_list() {
+        let conn = test_db();
+        ensure_session(&conn, "s1", None).unwrap();
+        ensure_session(&conn, "s2", None).unwrap();
+
+        let dismissed = dismiss_session(&conn, "s1").unwrap();
+        assert!(dismissed.is_some());
+        assert!(dismissed.unwrap().dismissed_at.is_some());
+
+        let active = list_active_sessions(&conn).unwrap();
+        assert_eq!(active.len(), 1, "dismissed session must be excluded from the active queue");
+        assert_eq!(active[0].session_id, "s2");
+
+        let full = list_sessions(&conn).unwrap();
+        assert_eq!(full.len(), 2, "dismissed session must still appear in the full/history listing");
+    }
 }

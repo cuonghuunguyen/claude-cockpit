@@ -18,7 +18,7 @@ function makeSession(overrides: Partial<Session> & Pick<Session, "sessionId">): 
   };
 }
 
-describe("compareSessions / orderSessions (D-04 Phase-1 biased ordering)", () => {
+describe("compareSessions / orderSessions (D-01..D-04 4-tier ranking)", () => {
   it("places a waiting-permission session above a plain running session", () => {
     const running = makeSession({
       sessionId: "running",
@@ -35,7 +35,7 @@ describe("compareSessions / orderSessions (D-04 Phase-1 biased ordering)", () =>
     expect(ordered.map((s) => s.sessionId)).toEqual(["waiting", "running"]);
   });
 
-  it("orders two waiting sessions by lastActivityAt (most recent first)", () => {
+  it("orders two waiting-input sessions oldest-lastActivityAt-first (D-04 attention tier)", () => {
     const older = makeSession({
       sessionId: "older",
       status: "waiting-input",
@@ -48,7 +48,7 @@ describe("compareSessions / orderSessions (D-04 Phase-1 biased ordering)", () =>
     });
 
     const ordered = orderSessions([older, newer]);
-    expect(ordered.map((s) => s.sessionId)).toEqual(["newer", "older"]);
+    expect(ordered.map((s) => s.sessionId)).toEqual(["older", "newer"]);
   });
 
   it("a done session also biases above a running session", () => {
@@ -58,6 +58,89 @@ describe("compareSessions / orderSessions (D-04 Phase-1 biased ordering)", () =>
     expect(orderSessions([running, done]).map((s) => s.sessionId)).toEqual([
       "done",
       "running",
+    ]);
+  });
+
+  it("orders the full 4-tier stack waiting-permission > waiting-input > done > running (D-01)", () => {
+    const running = makeSession({ sessionId: "running", status: "running" });
+    const done = makeSession({ sessionId: "done", status: "done" });
+    const waitingInput = makeSession({
+      sessionId: "waiting-input",
+      status: "waiting-input",
+    });
+    const waitingPermission = makeSession({
+      sessionId: "waiting-permission",
+      status: "waiting-permission",
+    });
+
+    const ordered = orderSessions([
+      running,
+      done,
+      waitingInput,
+      waitingPermission,
+    ]);
+    expect(ordered.map((s) => s.sessionId)).toEqual([
+      "waiting-permission",
+      "waiting-input",
+      "done",
+      "running",
+    ]);
+  });
+
+  it("waiting-permission always sorts above done, regardless of lastActivityAt", () => {
+    const donePermission = makeSession({
+      sessionId: "waiting-permission-recent",
+      status: "waiting-permission",
+      lastActivityAt: "2026-07-17T05:00:00.000Z",
+    });
+    const doneNewer = makeSession({
+      sessionId: "done-newer",
+      status: "done",
+      lastActivityAt: "2026-07-17T23:00:00.000Z",
+    });
+
+    const ordered = orderSessions([doneNewer, donePermission]);
+    expect(ordered.map((s) => s.sessionId)).toEqual([
+      "waiting-permission-recent",
+      "done-newer",
+    ]);
+  });
+
+  it("orders two done sessions oldest-lastActivityAt-first (D-04 attention tier)", () => {
+    const older = makeSession({
+      sessionId: "older-done",
+      status: "done",
+      lastActivityAt: "2026-07-17T09:00:00.000Z",
+    });
+    const newer = makeSession({
+      sessionId: "newer-done",
+      status: "done",
+      lastActivityAt: "2026-07-17T11:00:00.000Z",
+    });
+
+    const ordered = orderSessions([newer, older]);
+    expect(ordered.map((s) => s.sessionId)).toEqual([
+      "older-done",
+      "newer-done",
+    ]);
+  });
+
+  it("orders two running sessions newest-lastActivityAt-first (D-04 running tier keeps newest-first)", () => {
+    const older = makeSession({
+      sessionId: "older-running",
+      status: "running",
+      lastActivityAt: "2026-07-17T09:00:00.000Z",
+    });
+    const newer = makeSession({
+      sessionId: "newer-running",
+      status: "running",
+      lastActivityAt: "2026-07-17T11:00:00.000Z",
+    });
+
+    const ordered = orderSessions([older, newer]);
+    expect(ordered.map((s) => s.sessionId)).toEqual([
+      "newer-running",
+      "older-running",
     ]);
   });
 

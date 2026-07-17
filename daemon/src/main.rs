@@ -3,10 +3,6 @@
 //! Phase 1, Plan 01-02: binds `0.0.0.0:9427` inside WSL, generates/loads a
 //! per-install CSPRNG token, opens a WAL-mode SQLite store on the WSL-native
 //! filesystem, and wires the token-gated ingest routes.
-//!
-//! NOTE (TDD RED state): `build_router` does not yet merge the protected
-//! ingest routes — this is intentional so the integration test below fails
-//! first. The GREEN commit wires the auth middleware + ingest routes.
 
 mod auth;
 mod ingest;
@@ -107,13 +103,17 @@ fn set_owner_only_permissions(_path: &std::path::Path) -> std::io::Result<()> {
 }
 
 /// Builds the axum router: `/health` is unauthenticated (liveness only, no
-/// data); every other route requires the per-install token (FND-05).
-///
-/// TDD RED state: only `/health` is wired. GREEN commit merges the
-/// `ingest::routes()` behind `auth::require_token`.
+/// data); every other route requires the per-install token (FND-05), and
+/// this daemon emits no permissive CORS headers on any route.
 pub fn build_router(state: Arc<AppState>) -> Router {
+    let protected = ingest::routes().layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        auth::require_token,
+    ));
+
     Router::new()
         .route("/health", get(|| async { "ok" }))
+        .merge(protected)
         .with_state(state)
 }
 

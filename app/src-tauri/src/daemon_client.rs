@@ -124,7 +124,9 @@ fn toast_title(status: &str) -> &'static str {
 /// (D-08, via [`should_notify`]). Assembles the D-09 title/body from the
 /// frame's own `sessionId`/`status`/`workspace`/`branch`/`taskSummary`
 /// fields, threading `sessionId` through as the notification's `extra`
-/// payload so a future toast-click handler (Plan 02-03) has it available.
+/// payload — kept threaded in case a future native-activation path becomes
+/// available (see the D-10 click-activation note below), even though the
+/// locked stack cannot currently read it back from a real click.
 ///
 /// Body/title are assembled as PLAIN strings only — no HTML/markup
 /// interpolation path — matching this repo's established
@@ -135,6 +137,40 @@ fn toast_title(status: &str) -> &'static str {
 /// (D-05: default-ON); [`notification_enabled`] then applies the D-06
 /// settings gate for `waiting-input`/`done` only — `waiting-permission`
 /// never consults the store at all (NOT-03, Pitfall 2).
+///
+/// ## D-10 click-activation limitation (Plan 02-03, confirmed not wired)
+///
+/// This fired toast's click is NOT wired to `cockpit://focus-session`
+/// (`app/src/App.tsx`) on the locked stack. Verified directly against the
+/// installed crate source (Context7 quota exhausted, same fallback as
+/// 02-02-SUMMARY.md):
+///
+/// - `tauri-plugin-notification-2.3.3`'s desktop backend
+///   (`src/desktop.rs::imp::Notification::show`) builds a bare
+///   `notify_rust::Notification` from only `title`/`body`/`icon`/`sound` —
+///   the `extra` payload set via `.extra("sessionId", ...)` lives in
+///   `NotificationBuilder::data.extra` but is never read by desktop's
+///   `show()`, so it never reaches the OS notification at all on this
+///   platform.
+/// - The JS `onAction()`/`onNotificationReceived()` bindings register a
+///   Tauri plugin listener for `"actionPerformed"`/`"notification"` events,
+///   but desktop.rs contains no code that ever emits either — only the
+///   mobile (Kotlin/Swift) plugin implementations do, which don't exist for
+///   desktop. An `onAction()` listener on Windows/macOS/Linux is therefore
+///   permanently dead — registering one and presenting it as functional
+///   would violate this plan's transparency requirement.
+/// - The underlying `notify-rust` crate DOES support Windows click
+///   activation at a lower level (`windows.rs::NotificationHandle::
+///   wait_for_action`), but `show()` above discards the returned handle
+///   (`let _ = notification.show();`) and never calls it — so that
+///   capability is unreachable through this locked `tauri-plugin-
+///   notification` version.
+///
+/// Tracked upstream: <https://github.com/tauri-apps/plugins-workspace/issues/2150>
+/// (open as of this plan). If that issue lands a desktop activation API,
+/// wire it here to emit `FOCUS_SESSION_EVENT_NAME` (`app/src/App.tsx`) with
+/// this `extra.sessionId` — the invokable focus/scroll/highlight mechanism
+/// (Plan 02-03 Task 1) is already ready to receive it.
 fn maybe_fire_notification(app: &AppHandle, value: &Value) {
     let (Some(session_id), Some(status)) = (
         value.get("sessionId").and_then(Value::as_str),

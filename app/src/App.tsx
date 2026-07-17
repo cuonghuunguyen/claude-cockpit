@@ -21,11 +21,22 @@ const SESSION_EVENT_NAME = "cockpit://session-event";
 /**
  * Tauri event carrying `{ sessionId }`, emitted whenever the D-10
  * window-focus + scroll-to-card + highlight mechanism should run (Plan
- * 02-03). Today nothing on the locked `tauri-plugin-notification` desktop
- * backend can emit this from a real toast click (see `daemon_client.rs`'s
- * `maybe_fire_notification` doc comment and 02-03-SUMMARY.md) — this event
- * is the invokable mechanism's entry point, ready for whatever future
- * native-activation path becomes available.
+ * 02-03).
+ *
+ * D-10 click-activation limitation (confirmed, not silently assumed): a real
+ * fired toast's click does NOT currently emit this event on the locked
+ * `tauri-plugin-notification` v2.3.3 stack. Desktop's `NotificationBuilder`
+ * discards the `extra` payload before it ever reaches the OS notification,
+ * and the plugin's `onAction()`/`onNotificationReceived()` JS bindings
+ * listen for Tauri plugin events that only the (absent-on-desktop)
+ * mobile-platform implementations ever emit — see the full determination in
+ * `daemon_client.rs::maybe_fire_notification`'s doc comment and
+ * 02-03-SUMMARY.md. Tracked upstream:
+ * <https://github.com/tauri-apps/plugins-workspace/issues/2150>.
+ *
+ * This event name and the mechanism below remain the correct integration
+ * point for whatever future native-activation path lands — nothing here is
+ * a dead/no-op click handler; it is simply not wired to a real click yet.
  */
 const FOCUS_SESSION_EVENT_NAME = "cockpit://focus-session";
 

@@ -540,6 +540,30 @@ mod tests {
     }
 
     #[test]
+    fn append_event_trims_to_event_cap_without_deleting_the_session_row() {
+        let conn = test_db();
+        ensure_session(&conn, "s1", None).unwrap();
+        for i in 0..350 {
+            append_event(&conn, "s1", "tool_use", None, &format!("event {i}"), None, false).unwrap();
+        }
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE session_id = ?1",
+                params!["s1"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 300,
+            "a session with 350 appended events must retain exactly the newest 300 (D-11 cap)"
+        );
+
+        let row = get_session(&conn, "s1").unwrap();
+        assert!(row.is_some(), "the session row itself must never be auto-deleted by trimming (D-11)");
+    }
+
+    #[test]
     fn rehydrate_active_sessions_returns_only_unresolved_undismissed() {
         let conn = test_db();
         // one done + undismissed -> should rehydrate

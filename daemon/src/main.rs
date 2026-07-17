@@ -69,6 +69,9 @@ pub enum DbCommand {
         respond: oneshot::Sender<store::SessionRow>,
     },
     ListSessions {
+        /// `true` restricts to the active queue (`dismissed_at IS NULL`,
+        /// D-06/D-07); `false` returns the full/history listing.
+        active_only: bool,
         respond: oneshot::Sender<Vec<store::SessionRow>>,
     },
     /// One entry point for every Plan 01-03 ingest handler (UserPromptSubmit,
@@ -181,8 +184,15 @@ fn spawn_db_writer(conn: rusqlite::Connection) -> mpsc::Sender<DbCommand> {
                         let _ = respond.send(row);
                     }
                 }
-                DbCommand::ListSessions { respond } => {
-                    let rows = store::list_sessions(&conn).unwrap_or_default();
+                DbCommand::ListSessions {
+                    active_only,
+                    respond,
+                } => {
+                    let rows = if active_only {
+                        store::list_active_sessions(&conn).unwrap_or_default()
+                    } else {
+                        store::list_sessions(&conn).unwrap_or_default()
+                    };
                     let _ = respond.send(rows);
                 }
                 DbCommand::IngestEvent { request, respond } => {

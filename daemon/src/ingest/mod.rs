@@ -13,11 +13,12 @@ pub mod stop;
 pub mod user_prompt_submit;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
+use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -44,13 +45,32 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/sessions/{id}/dismiss", post(dismiss_session))
 }
 
+#[derive(Debug, Deserialize)]
+struct ListSessionsQuery {
+    /// `?active=true` (or `1`) restricts the listing to the active queue —
+    /// `dismissed_at IS NULL` (D-06/D-07). Omitted/false returns the full
+    /// history listing (unchanged default behavior from Plan 01-02).
+    #[serde(default)]
+    active: Option<String>,
+}
+
+fn is_truthy(v: &str) -> bool {
+    matches!(v, "1" | "true" | "TRUE" | "yes")
+}
+
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<ListSessionsQuery>,
 ) -> Result<Json<Vec<crate::store::SessionApi>>, StatusCode> {
+    let active_only = query.active.as_deref().is_some_and(is_truthy);
+
     let (respond, rx) = oneshot::channel();
     state
         .db_tx
-        .send(DbCommand::ListSessions { respond })
+        .send(DbCommand::ListSessions {
+            active_only,
+            respond,
+        })
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

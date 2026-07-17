@@ -187,21 +187,40 @@ async fn consume_events_once(app: &AppHandle, token: &str) -> Result<(), String>
     mark_reachable(app, app.state::<ReachabilityState>().inner());
 
     let mut stream = resp.bytes_stream();
-    let mut buf = String::new();
+    // WR-03 fix: accumulate raw bytes rather than decoding each network
+    // chunk independently with `from_utf8_lossy`. Chunk boundaries are
+    // determined by the OS/network stack, not by UTF-8 character
+    // boundaries — a multi-byte character split across two chunks would
+    // otherwise get silently replaced with U+FFFD in the earlier chunk.
+    // Decoding is deferred until a complete frame (delimited by the ASCII
+    // "\n\n" sequence, safe to search for in raw bytes) has been assembled.
+    let mut buf: Vec<u8> = Vec::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| e.to_string())?;
-        buf.push_str(&String::from_utf8_lossy(&chunk));
+        buf.extend_from_slice(&chunk);
 
         // SSE frames are separated by a blank line ("\n\n").
-        while let Some(pos) = buf.find("\n\n") {
-            let frame = buf[..pos].to_string();
-            buf.drain(..pos + 2);
-            emit_sse_frame(app, &frame);
+        while let Some(pos) = find_double_newline(&buf) {
+            let frame_bytes: Vec<u8> = buf.drain(..pos + 2).collect();
+            match std::str::from_utf8(&frame_bytes[..frame_bytes.len() - 2]) {
+                Ok(frame) => emit_sse_frame(app, frame),
+                Err(err) => {
+                    eprintln!("cockpit: dropped non-UTF8 SSE frame: {err}");
+                }
+            }
         }
     }
 
     Ok(())
+}
+
+/// Finds the byte offset of the first `"\n\n"` frame delimiter in `buf`, if
+/// any. Operates on raw bytes (not `&str`) so it can be called safely
+/// before a frame is known to be valid UTF-8 (WR-03) — `"\n\n"` is ASCII,
+/// so it can never appear as part of a multi-byte UTF-8 sequence.
+fn find_double_newline(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == b"\n\n")
 }
 
 fn emit_sse_frame(app: &AppHandle, frame: &str) {

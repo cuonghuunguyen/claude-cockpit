@@ -63,14 +63,25 @@ function resolveConfig(argv, env) {
   return { token, port };
 }
 
-function readStdin() {
+/** WR-04 fix: `AbortSignal.timeout(CONNECT_TIMEOUT_MS)` on the `fetch()` call
+ * only bounds the request phase — it never fires if stdin itself never
+ * emits 'end' (a hung pipe, a caller-side bug). That left the "independent
+ * of, and far tighter than, whatever `timeout` the hook config declares"
+ * claim above unenforced for the stdin-read phase. Bound this read with its
+ * own timer so the fail-open budget holds even if stdin never closes. */
+function readStdin(timeoutMs = CONNECT_TIMEOUT_MS) {
   return new Promise((resolve) => {
     let buf = "";
+    const timer = setTimeout(() => resolve(buf), timeoutMs);
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (d) => (buf += d));
-    process.stdin.on("end", () => resolve(buf));
+    process.stdin.on("end", () => {
+      clearTimeout(timer);
+      resolve(buf);
+    });
     // If stdin is already closed/empty (e.g. a TTY with no piped input),
-    // 'end' still fires; nothing further to guard here.
+    // 'end' still fires promptly; the timer above is the fail-safe if it
+    // doesn't.
   });
 }
 

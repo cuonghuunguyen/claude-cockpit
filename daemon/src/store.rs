@@ -9,6 +9,8 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Opens (or creates) the SQLite database at `path`, enables WAL mode, and
@@ -264,11 +266,34 @@ pub fn set_task_summary_if_absent(
 /// unbounded blob from untrusted tool/session input).
 const MAX_PAYLOAD_JSON_LEN: usize = 8192;
 
+/// Per-session event cap (D-11/T-01-03c): a single session's timeline never
+/// grows unbounded on disk, but the session row itself is never deleted.
+const EVENT_CAP: i64 = 300;
+
+/// Trim cadence: run the (slightly more expensive) capped-DELETE roughly
+/// every this many inserts for a given session_id, not on every single
+/// insert, so the hot write path (one INSERT) stays cheap
+/// (01-RESEARCH.md Persistence).
+const TRIM_EVERY_N_INSERTS: u32 = 50;
+
+/// Per-session insert counters used to amortize the cap-trim (see
+/// `TRIM_EVERY_N_INSERTS`). Deliberately an in-process, non-persisted
+/// counter: it resets to 0 on daemon restart, meaning a session could
+/// transiently hold slightly more than `EVENT_CAP` rows for a short window
+/// right after a restart, but the trim itself (`DELETE ... ORDER BY id DESC
+/// LIMIT`) is idempotent and always correct whenever it runs — no
+/// persisted state is needed for correctness, only for cadence.
+fn insert_counters() -> &'static Mutex<HashMap<String, u32>> {
+    static COUNTERS: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+    COUNTERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Appends one condensed-timeline event row (D-09/MON-03). Marking
 /// `is_error` records the event for visibility only — it is the caller's
 /// responsibility (see `main.rs::handle_ingest_event`) to never invoke a
 /// status transition alongside an error event (D-10/MON-05); this function
-/// itself never touches the `sessions` table.
+/// itself never touches the `sessions` table (aside from the amortized
+/// event-cap trim below, which only ever deletes from `events`).
 pub fn append_event(
     conn: &Connection,
     session_id: &str,
@@ -298,6 +323,35 @@ pub fn append_event(
             is_error as i64,
             now_millis()
         ],
+    )?;
+
+    let should_trim = {
+        let mut counters = insert_counters().lock().unwrap_or_else(|e| e.into_inner());
+        let counter = counters.entry(session_id.to_string()).or_insert(0);
+        *counter += 1;
+        if *counter >= TRIM_EVERY_N_INSERTS {
+            *counter = 0;
+            true
+        } else {
+            false
+        }
+    };
+    if should_trim {
+        trim_session_events(conn, session_id)?;
+    }
+    Ok(())
+}
+
+/// Deletes every `events` row for `session_id` beyond the newest
+/// `EVENT_CAP`, keyed by `id` (monotonically increasing insertion order).
+/// Never touches the `sessions` table — a session's row is never deleted by
+/// trimming (D-11).
+fn trim_session_events(conn: &Connection, session_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM events WHERE session_id = ?1 AND id NOT IN (
+            SELECT id FROM events WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2
+        )",
+        params![session_id, EVENT_CAP],
     )?;
     Ok(())
 }
@@ -541,16 +595,21 @@ mod tests {
 
     #[test]
     fn append_event_trims_to_event_cap_without_deleting_the_session_row() {
+        // Distinct session_id: the amortized-trim counter is a process-wide
+        // static keyed by session_id (see `insert_counters()`), so it must
+        // not collide with any other test's session_id in this same test
+        // binary (cargo runs unit tests in parallel within one process).
         let conn = test_db();
-        ensure_session(&conn, "s1", None).unwrap();
+        let sid = "s-event-cap-test-350";
+        ensure_session(&conn, sid, None).unwrap();
         for i in 0..350 {
-            append_event(&conn, "s1", "tool_use", None, &format!("event {i}"), None, false).unwrap();
+            append_event(&conn, sid, "tool_use", None, &format!("event {i}"), None, false).unwrap();
         }
 
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM events WHERE session_id = ?1",
-                params!["s1"],
+                params![sid],
                 |r| r.get(0),
             )
             .unwrap();
@@ -559,7 +618,7 @@ mod tests {
             "a session with 350 appended events must retain exactly the newest 300 (D-11 cap)"
         );
 
-        let row = get_session(&conn, "s1").unwrap();
+        let row = get_session(&conn, sid).unwrap();
         assert!(row.is_some(), "the session row itself must never be auto-deleted by trimming (D-11)");
     }
 

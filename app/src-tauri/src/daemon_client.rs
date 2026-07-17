@@ -173,3 +173,30 @@ pub async fn dismiss_session(
 
     Ok(())
 }
+
+/// Tauri command: GETs the token-authed `/sessions/:id/events` (Plan 01-05
+/// D-09) so the frontend's expanded-card timeline can fetch a single
+/// session's condensed event history. Added in this plan — no route existed
+/// to fetch per-session events before it (see 01-05-SUMMARY.md deviations).
+#[tauri::command]
+pub async fn get_session_events(
+    token: tauri::State<'_, TokenState>,
+    session_id: String,
+) -> Result<Value, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{DAEMON_BASE_URL}/sessions/{session_id}/events"))
+        .bearer_auth(&token.0)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !resp.status().is_success() {
+        return Err(format!(
+            "daemon GET /sessions/{session_id}/events returned {}",
+            resp.status()
+        ));
+    }
+
+    resp.json::<Value>().await.map_err(|e| e.to_string())
+}

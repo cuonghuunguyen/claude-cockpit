@@ -463,6 +463,65 @@ pub fn list_active_sessions(conn: &Connection) -> rusqlite::Result<Vec<SessionRo
     rows.collect()
 }
 
+/// Raw DB-shaped timeline-event row (epoch-millis `created_at`, matches the
+/// `events` DDL). Converted to [`EventApi`] for wire responses, mirroring
+/// the `SessionRow`/`SessionApi` split above.
+#[derive(Debug, Clone)]
+pub struct EventRow {
+    pub kind: String,
+    pub tool_name: Option<String>,
+    pub summary: String,
+    pub is_error: bool,
+    pub created_at: i64,
+}
+
+/// API/wire-facing shape matching `shared/types.ts`'s `TimelineEvent`
+/// (camelCase, ISO 8601 `createdAt`). Added in Plan 01-05 to back the
+/// dashboard's expandable per-session timeline (D-09) — no route exposed
+/// per-session events before this plan.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventApi {
+    pub kind: String,
+    pub tool_name: Option<String>,
+    pub summary: String,
+    pub is_error: bool,
+    pub created_at: String,
+}
+
+impl From<&EventRow> for EventApi {
+    fn from(row: &EventRow) -> Self {
+        EventApi {
+            kind: row.kind.clone(),
+            tool_name: row.tool_name.clone(),
+            summary: row.summary.clone(),
+            is_error: row.is_error,
+            created_at: millis_to_rfc3339(row.created_at),
+        }
+    }
+}
+
+/// Lists a session's condensed-timeline events in chronological order
+/// (oldest first — D-09 "optimized for reading", frontend groups/condenses
+/// on top of this). The per-session event cap (D-11/`EVENT_CAP`) already
+/// bounds row count, so no additional `LIMIT` is applied here.
+pub fn list_events(conn: &Connection, session_id: &str) -> rusqlite::Result<Vec<EventRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT kind, tool_name, summary, is_error, created_at
+         FROM events WHERE session_id = ?1 ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map(params![session_id], |row| {
+        Ok(EventRow {
+            kind: row.get(0)?,
+            tool_name: row.get(1)?,
+            summary: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            is_error: row.get::<_, i64>(3)? != 0,
+            created_at: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
 /// Reads a single session by its primary key.
 pub fn get_session(conn: &Connection, session_id: &str) -> rusqlite::Result<Option<SessionRow>> {
     conn.query_row(
@@ -653,6 +712,25 @@ mod tests {
             full.iter().any(|r| r.session_id == "s-done-dismissed"),
             "dismissed session must still appear in the full/history listing"
         );
+    }
+
+    #[test]
+    fn list_events_returns_chronological_order_for_one_session_only() {
+        let conn = test_db();
+        ensure_session(&conn, "s1", None).unwrap();
+        ensure_session(&conn, "s2", None).unwrap();
+        append_event(&conn, "s1", "user_prompt", None, "first", None, false).unwrap();
+        append_event(&conn, "s1", "tool_use", Some("Bash"), "ran ls", None, false).unwrap();
+        append_event(&conn, "s2", "user_prompt", None, "other session", None, false).unwrap();
+        append_event(&conn, "s1", "error", None, "boom", None, true).unwrap();
+
+        let events = list_events(&conn, "s1").unwrap();
+        assert_eq!(events.len(), 3, "only s1's events are returned");
+        assert_eq!(events[0].kind, "user_prompt");
+        assert_eq!(events[1].kind, "tool_use");
+        assert_eq!(events[1].tool_name.as_deref(), Some("Bash"));
+        assert_eq!(events[2].kind, "error");
+        assert!(events[2].is_error);
     }
 
     #[test]

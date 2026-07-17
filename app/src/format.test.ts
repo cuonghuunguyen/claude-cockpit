@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { Session } from "../../shared/types";
-import { compareSessions, orderSessions } from "./format";
+import type { Session, TimelineEvent } from "../../shared/types";
+import { compareSessions, groupTimelineEvents, orderSessions } from "./format";
 
 function makeSession(overrides: Partial<Session> & Pick<Session, "sessionId">): Session {
   return {
@@ -91,5 +91,81 @@ describe("compareSessions / orderSessions (D-04 Phase-1 biased ordering)", () =>
     expect(
       orderSessions([runningWithRecentError, blocked]).map((s) => s.sessionId),
     ).toEqual(["blocked", "running-recent"]);
+  });
+});
+
+function makeEvent(overrides: Partial<TimelineEvent>): TimelineEvent {
+  return {
+    kind: "tool_use",
+    toolName: null,
+    summary: "",
+    isError: false,
+    createdAt: "2026-07-17T10:00:00.000Z",
+    ...overrides,
+  };
+}
+
+describe("groupTimelineEvents (D-09 condensed/grouped timeline)", () => {
+  it("collapses a run of 5 consecutive same-kind routine events into one grouped entry", () => {
+    const events: TimelineEvent[] = Array.from({ length: 5 }, (_, i) =>
+      makeEvent({ kind: "tool_use", toolName: "Bash", summary: `cmd ${i}` }),
+    );
+
+    const grouped = groupTimelineEvents(events);
+    expect(grouped).toHaveLength(1);
+    expect(grouped[0].count).toBe(5);
+    expect(grouped[0].label).toContain("5");
+  });
+
+  it("renders a prompt/permission/completion/error each individually, never grouped", () => {
+    const events: TimelineEvent[] = [
+      makeEvent({ kind: "user_prompt", summary: "build the dashboard" }),
+      makeEvent({ kind: "notification", summary: "permission requested" }),
+      makeEvent({ kind: "completion", summary: "turn finished" }),
+      makeEvent({ kind: "error", summary: "boom", isError: true }),
+    ];
+
+    const grouped = groupTimelineEvents(events);
+    expect(grouped).toHaveLength(4);
+    grouped.forEach((entry) => expect(entry.count).toBe(1));
+    expect(grouped.map((e) => e.kind)).toEqual([
+      "user_prompt",
+      "notification",
+      "completion",
+      "error",
+    ]);
+    expect(grouped[3].isError).toBe(true);
+  });
+
+  it("does not group a routine event into a run that contains an error", () => {
+    const events: TimelineEvent[] = [
+      makeEvent({ kind: "tool_use", toolName: "Bash" }),
+      makeEvent({ kind: "tool_use", toolName: "Bash", isError: true }),
+      makeEvent({ kind: "tool_use", toolName: "Bash" }),
+    ];
+
+    const grouped = groupTimelineEvents(events);
+    // The error event splits the run: [routine], [error], [routine].
+    expect(grouped).toHaveLength(3);
+    expect(grouped[1].isError).toBe(true);
+    expect(grouped[1].count).toBe(1);
+  });
+
+  it("mixed routine runs interleaved with call-outs group only the routine runs", () => {
+    const events: TimelineEvent[] = [
+      makeEvent({ kind: "user_prompt", summary: "start" }),
+      makeEvent({ kind: "tool_use", toolName: "Edit" }),
+      makeEvent({ kind: "tool_use", toolName: "Edit" }),
+      makeEvent({ kind: "tool_use", toolName: "Edit" }),
+      makeEvent({ kind: "completion", summary: "done" }),
+    ];
+
+    const grouped = groupTimelineEvents(events);
+    expect(grouped.map((e) => e.kind)).toEqual([
+      "user_prompt",
+      "tool_use",
+      "completion",
+    ]);
+    expect(grouped[1].count).toBe(3);
   });
 });

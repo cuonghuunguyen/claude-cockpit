@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Session } from "../../shared/types";
 import { Queue } from "./Queue";
+import { SessionCard } from "./SessionCard";
 import "./styles.css";
 
 /**
@@ -19,12 +20,13 @@ const SESSION_EVENT_NAME = "cockpit://session-event";
  * Loads the full session list (`get_sessions` — active + history in one
  * call) on mount, then keeps it live via `listen(cockpit://session-event)`
  * with no manual refresh (MON-04). `Queue` renders only the still-active
- * (undismissed) sessions; Task 2 of this plan adds the dismiss control and
- * a history view for dismissed ones (D-06).
+ * (undismissed) sessions; dismissed sessions move to a collapsible history
+ * section below (D-06), sorted most-recently-dismissed first.
  */
 function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -66,13 +68,57 @@ function App() {
     };
   }, []);
 
+  /**
+   * Optimistic dismiss (D-06): the daemon's `dismiss_session` call already
+   * succeeded by the time `SessionCard` invokes this (see
+   * `SessionCard.tsx::handleDismiss`) — set `dismissedAt` locally right
+   * away so the card moves to history immediately, without waiting on the
+   * `cockpit://session-event` round-trip. That event still arrives shortly
+   * after and reconciles the authoritative `dismissedAt` (same idempotent
+   * upsert path used for every other live update).
+   */
+  function handleDismiss(sessionId: string) {
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.sessionId === sessionId && !s.dismissedAt
+          ? { ...s, dismissedAt: new Date().toISOString() }
+          : s,
+      ),
+    );
+  }
+
   const active = sessions.filter((s) => !s.dismissedAt);
+  const history = sessions
+    .filter((s) => s.dismissedAt)
+    .sort((a, b) => (b.dismissedAt ?? "").localeCompare(a.dismissedAt ?? ""));
 
   return (
     <main className="cockpit-container">
       <h1>Claude Cockpit</h1>
       {loadError && <p className="dashboard-warning">{loadError}</p>}
-      <Queue sessions={active} />
+      <Queue sessions={active} onDismiss={handleDismiss} />
+
+      <section className="history-section">
+        <button
+          type="button"
+          className="history-toggle"
+          onClick={() => setHistoryOpen((v) => !v)}
+          aria-expanded={historyOpen}
+        >
+          {historyOpen ? "Hide" : "Show"} history ({history.length})
+        </button>
+        {historyOpen && (
+          <div className="history-list">
+            {history.length === 0 ? (
+              <p className="history-empty">No dismissed sessions yet.</p>
+            ) : (
+              history.map((session) => (
+                <SessionCard key={session.sessionId} session={session} historical />
+              ))
+            )}
+          </div>
+        )}
+      </section>
     </main>
   );
 }

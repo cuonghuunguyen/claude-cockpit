@@ -16,7 +16,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             daemon_client::get_sessions,
-            daemon_client::dismiss_session
+            daemon_client::dismiss_session,
+            daemon_client::get_session_events
         ])
         .setup(|app| {
             // The Tauri Rust backend is the sole daemon client (SKELETON.md):

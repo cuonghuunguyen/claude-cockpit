@@ -4,6 +4,8 @@ import { SessionCard } from "./SessionCard";
 
 interface QueueProps {
   sessions: Session[];
+  /** Passed through to each card's dismiss control (D-06). */
+  onDismiss: (sessionId: string) => void;
 }
 
 /**
@@ -12,7 +14,7 @@ interface QueueProps {
  * waiting/blocked and done sessions toward the top, with most-recent
  * activity as the tiebreaker/fallback.
  */
-export function Queue({ sessions }: QueueProps) {
+export function Queue({ sessions, onDismiss }: QueueProps) {
   const ordered = orderSessions(sessions);
 
   if (ordered.length === 0) {
@@ -26,7 +28,7 @@ export function Queue({ sessions }: QueueProps) {
   return (
     <div className="queue" data-testid="queue">
       {ordered.map((session) => (
-        <SessionCard key={session.sessionId} session={session} />
+        <SessionCard key={session.sessionId} session={session} onDismiss={onDismiss} />
       ))}
     </div>
   );

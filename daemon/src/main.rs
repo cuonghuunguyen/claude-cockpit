@@ -86,6 +86,12 @@ pub enum DbCommand {
         session_id: String,
         respond: oneshot::Sender<Option<store::SessionRow>>,
     },
+    /// `GET /sessions/:id/events` (Plan 01-05 D-09): backs the dashboard's
+    /// expandable per-session condensed timeline.
+    ListEvents {
+        session_id: String,
+        respond: oneshot::Sender<Vec<store::EventRow>>,
+    },
 }
 
 /// Shared daemon state: the loaded auth token, a handle to the DB writer,
@@ -205,6 +211,10 @@ fn spawn_db_writer(conn: rusqlite::Connection) -> mpsc::Sender<DbCommand> {
                         .ok()
                         .flatten();
                     let _ = respond.send(row);
+                }
+                DbCommand::ListEvents { session_id, respond } => {
+                    let rows = store::list_events(&conn, &session_id).unwrap_or_default();
+                    let _ = respond.send(rows);
                 }
             }
         }
@@ -451,6 +461,58 @@ mod tests {
             .await
             .expect("GET /sessions without token");
         assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn session_events_route_is_token_gated_and_chronological() {
+        let token = "events-route-test-token-0123456789abcdef01";
+        let base = spawn_test_daemon(token).await;
+        let client = reqwest::Client::new();
+
+        client
+            .post(format!("{base}/hooks/session-start"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({"session_id": "ev1", "cwd": "/tmp/ev", "source": "startup"}))
+            .send()
+            .await
+            .expect("POST session-start");
+        client
+            .post(format!("{base}/hooks/user-prompt-submit"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({"session_id": "ev1", "prompt": "build the dashboard"}))
+            .send()
+            .await
+            .expect("POST user-prompt-submit");
+        client
+            .post(format!("{base}/hooks/pre-tool-use"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({"session_id": "ev1", "tool_name": "Bash", "tool_input": {"command": "ls"}}))
+            .send()
+            .await
+            .expect("POST pre-tool-use");
+
+        // No token -> 401.
+        let resp = client
+            .get(format!("{base}/sessions/ev1/events"))
+            .send()
+            .await
+            .expect("GET events without token");
+        assert_eq!(resp.status(), 401);
+
+        // Valid token -> 200, chronological (oldest first), camelCase.
+        let resp = client
+            .get(format!("{base}/sessions/ev1/events"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .expect("GET events with token");
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.expect("parse events JSON");
+        let events = body.as_array().expect("events is a JSON array");
+        assert_eq!(events.len(), 2, "expected exactly the 2 non-SessionStart events");
+        assert_eq!(events[0]["kind"], "user_prompt");
+        assert_eq!(events[1]["kind"], "tool_use");
+        assert_eq!(events[1]["toolName"], "Bash");
     }
 
     #[tokio::test]

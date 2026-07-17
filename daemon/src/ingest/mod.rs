@@ -43,6 +43,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/hooks/session-end", post(session_end::session_end))
         .route("/sessions", get(list_sessions))
         .route("/sessions/{id}/dismiss", post(dismiss_session))
+        .route("/sessions/{id}/events", get(list_session_events))
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,6 +104,27 @@ async fn dismiss_session(
         }
         None => Err(StatusCode::NOT_FOUND),
     }
+}
+
+/// `GET /sessions/:id/events` (Plan 01-05 D-09): the dashboard's expandable
+/// per-session condensed-timeline fetch. Returns `[]` (not 404) for an
+/// unknown session_id — the frontend only calls this for a session it
+/// already has from `GET /sessions`, so an empty timeline is the correct,
+/// harmless response rather than a special-cased error.
+async fn list_session_events(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Vec<crate::store::EventApi>>, StatusCode> {
+    let (respond, rx) = oneshot::channel();
+    state
+        .db_tx
+        .send(DbCommand::ListEvents { session_id, respond })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let rows = rx.await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let api: Vec<crate::store::EventApi> = rows.iter().map(Into::into).collect();
+    Ok(Json(api))
 }
 
 /// Shared dispatch helper used by every Plan 01-03 ingest handler: sends the

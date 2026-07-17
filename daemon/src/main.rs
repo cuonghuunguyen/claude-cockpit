@@ -30,6 +30,34 @@ const COCKPIT_PORT: u16 = 9427;
 /// CSPRNG token length in bytes (>= 32 per FND-05 / Don't-Hand-Roll table).
 const TOKEN_BYTES: usize = 32;
 
+/// Everything an ingest handler (Plan 01-03 Task 1) needs the DB-writer
+/// thread to do for one incoming hook event: compute the status transition
+/// (`session_state::transition`), update the session row, optionally set
+/// the first-prompt task summary (D-08), and append a condensed-timeline
+/// entry (unless `timeline_kind` is `None`, e.g. `SessionEnd`).
+///
+/// `is_error` events (Rule: D-10/MON-05) skip the status transition
+/// entirely — they are recorded for visibility only and never reorder or
+/// notify.
+pub struct IngestEventRequest {
+    pub session_id: String,
+    pub event: session_state::HookEvent,
+    /// Raw `cwd`, when the payload carries one (currently unused by any
+    /// Plan 01-03 event — SessionStart already handles cwd in Plan 01-02 —
+    /// kept for forward compatibility / defensive `ensure_session` calls).
+    pub cwd: Option<String>,
+    pub notification_type: Option<String>,
+    pub tool_name: Option<String>,
+    pub timeline_summary: String,
+    pub payload_json: Option<String>,
+    pub is_error: bool,
+    /// Set only by `UserPromptSubmit`: the prompt text to store as
+    /// `task_summary` if this is the session's first-ever prompt.
+    pub first_prompt_text: Option<String>,
+    /// Set only by `SessionEnd`: marks `ended_at` without touching status.
+    pub mark_ended: bool,
+}
+
 /// Commands sent to the dedicated SQLite writer thread. A single writer
 /// path is how this daemon avoids hand-rolled locking under concurrent hook
 /// POSTs (01-RESEARCH.md "Persistence" / Don't-Hand-Roll table).
@@ -42,6 +70,18 @@ pub enum DbCommand {
     },
     ListSessions {
         respond: oneshot::Sender<Vec<store::SessionRow>>,
+    },
+    /// One entry point for every Plan 01-03 ingest handler (UserPromptSubmit,
+    /// PreToolUse, PostToolUse, Notification, Stop, SubagentStop,
+    /// SessionEnd) — see [`IngestEventRequest`].
+    IngestEvent {
+        request: IngestEventRequest,
+        respond: oneshot::Sender<store::SessionRow>,
+    },
+    /// `POST /sessions/:id/dismiss` (D-06).
+    DismissSession {
+        session_id: String,
+        respond: oneshot::Sender<Option<store::SessionRow>>,
     },
 }
 
@@ -145,10 +185,94 @@ fn spawn_db_writer(conn: rusqlite::Connection) -> mpsc::Sender<DbCommand> {
                     let rows = store::list_sessions(&conn).unwrap_or_default();
                     let _ = respond.send(rows);
                 }
+                DbCommand::IngestEvent { request, respond } => {
+                    if let Ok(row) = handle_ingest_event(&conn, request) {
+                        let _ = respond.send(row);
+                    }
+                }
+                DbCommand::DismissSession { session_id, respond } => {
+                    let row = store::dismiss_session(&conn, &session_id)
+                        .ok()
+                        .flatten();
+                    let _ = respond.send(row);
+                }
             }
         }
     });
     tx
+}
+
+/// Applies one [`IngestEventRequest`] against the store: ensures the
+/// session row exists (defensive against a hook arriving before/without a
+/// SessionStart — e.g. Cockpit started mid-session), computes the status
+/// transition (skipped entirely for `is_error` events per D-10/MON-05),
+/// stores the first-prompt task summary when present, appends the
+/// condensed-timeline entry (when the event has one), and marks `ended_at`
+/// for `SessionEnd`.
+fn handle_ingest_event(
+    conn: &rusqlite::Connection,
+    req: IngestEventRequest,
+) -> rusqlite::Result<store::SessionRow> {
+    let existing = store::get_session(conn, &req.session_id)?;
+    let current_status = existing
+        .as_ref()
+        .map(|r| r.status.clone())
+        .unwrap_or_else(|| "running".to_string());
+    if existing.is_none() {
+        store::ensure_session(conn, &req.session_id, req.cwd.as_deref())?;
+    }
+
+    if req.is_error {
+        // Errors are timeline-only (D-10/MON-05): never touch status, never
+        // reorder, never notify. Still bump last_activity_at so the card's
+        // "last activity" reflects real traffic.
+        store::touch_last_activity(conn, &req.session_id)?;
+    } else if req.mark_ended {
+        // SessionEnd: mark ended_at only, status stays whatever it already
+        // was (D-06/D-07 — a done/waiting unresolved session stays visible).
+        store::mark_ended(conn, &req.session_id)?;
+    } else {
+        let new_status = session_state::transition(
+            &current_status,
+            req.event,
+            req.notification_type.as_deref(),
+        );
+        // PreToolUse is the only event that sets a current_tool; every
+        // other event clears it (no tool is currently in flight).
+        let current_tool = if matches!(req.event, session_state::HookEvent::PreToolUse) {
+            req.tool_name.as_deref()
+        } else {
+            None
+        };
+        store::update_session_status(conn, &req.session_id, &new_status, current_tool)?;
+
+        if let Some(text) = &req.first_prompt_text {
+            store::set_task_summary_if_absent(conn, &req.session_id, text)?;
+        }
+    }
+
+    // An error always surfaces as an "error" timeline kind regardless of
+    // its originating hook event (D-10/MON-05: visibility only, never a
+    // status/notification effect — already guaranteed above since the
+    // `req.is_error` branch never calls `transition`/`update_session_status`).
+    let kind = if req.is_error {
+        Some("error")
+    } else {
+        session_state::timeline_kind(req.event)
+    };
+    if let Some(kind) = kind {
+        store::append_event(
+            conn,
+            &req.session_id,
+            kind,
+            req.tool_name.as_deref(),
+            &req.timeline_summary,
+            req.payload_json.as_deref(),
+            req.is_error,
+        )?;
+    }
+
+    store::get_session(conn, &req.session_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
 }
 
 #[tokio::main]

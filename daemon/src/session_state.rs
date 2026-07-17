@@ -44,9 +44,14 @@ pub enum NotificationClass {
 /// strings below are a reasoned best guess (RESEARCH.md A2); Task 3's live
 /// smoke test confirms or corrects them against real Claude Code traffic —
 /// this is the single place that correction needs to land.
-pub fn classify_notification(_notification_type: &str) -> NotificationClass {
-    // RED: not yet implemented — see 01-03-PLAN.md Task 1 GREEN commit.
-    todo!("classify_notification: implement in GREEN commit")
+pub fn classify_notification(notification_type: &str) -> NotificationClass {
+    match notification_type {
+        "permission_request" | "permission" | "tool_permission" | "permission_prompt" => {
+            NotificationClass::WaitingPermission
+        }
+        "idle" | "waiting_for_input" | "input" | "needs_input" => NotificationClass::WaitingInput,
+        _ => NotificationClass::WaitingInput,
+    }
 }
 
 /// Pure transition function: given the session's current status string and
@@ -55,9 +60,28 @@ pub fn classify_notification(_notification_type: &str) -> NotificationClass {
 ///
 /// Matches shared/types.ts's `SessionStatus` union exactly: "running",
 /// "waiting-permission", "waiting-input", "done".
-pub fn transition(_current: &str, _event: HookEvent, _notification_type: Option<&str>) -> String {
-    // RED: not yet implemented — see 01-03-PLAN.md Task 1 GREEN commit.
-    todo!("transition: implement in GREEN commit")
+pub fn transition(current: &str, event: HookEvent, notification_type: Option<&str>) -> String {
+    match event {
+        HookEvent::SessionStart => "running".to_string(),
+        // UserPromptSubmit clears any prior done/waiting state back to
+        // running, regardless of what `current` was (01-03-PLAN.md Task 1
+        // behavior).
+        HookEvent::UserPromptSubmit => "running".to_string(),
+        // PreToolUse is observe-only but still reflects the session as
+        // actively running with a tool in flight.
+        HookEvent::PreToolUse => "running".to_string(),
+        // PostToolUse itself never changes status.
+        HookEvent::PostToolUse => current.to_string(),
+        HookEvent::Notification => match classify_notification(notification_type.unwrap_or("")) {
+            NotificationClass::WaitingPermission => "waiting-permission".to_string(),
+            NotificationClass::WaitingInput => "waiting-input".to_string(),
+        },
+        HookEvent::Stop | HookEvent::SubagentStop => "done".to_string(),
+        // SessionEnd does not change status by itself (D-06/D-07: a
+        // done/waiting unresolved session stays visible after the process
+        // exits).
+        HookEvent::SessionEnd => current.to_string(),
+    }
 }
 
 /// Maps a hook event to its condensed-timeline `kind` (matches
@@ -65,9 +89,16 @@ pub fn transition(_current: &str, _event: HookEvent, _notification_type: Option<
 /// do not append a timeline entry of their own (`SessionStart` — handled by
 /// Plan 01-02's upsert path; `SessionEnd` — 01-03-PLAN.md's objective table
 /// lists no timeline entry for it).
-pub fn timeline_kind(_event: HookEvent) -> Option<&'static str> {
-    // RED: not yet implemented — see 01-03-PLAN.md Task 1 GREEN commit.
-    todo!("timeline_kind: implement in GREEN commit")
+pub fn timeline_kind(event: HookEvent) -> Option<&'static str> {
+    match event {
+        HookEvent::SessionStart => None,
+        HookEvent::UserPromptSubmit => Some("user_prompt"),
+        HookEvent::PreToolUse => Some("tool_use"),
+        HookEvent::PostToolUse => Some("tool_result"),
+        HookEvent::Notification => Some("notification"),
+        HookEvent::Stop | HookEvent::SubagentStop => Some("completion"),
+        HookEvent::SessionEnd => None,
+    }
 }
 
 #[cfg(test)]

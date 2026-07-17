@@ -7,6 +7,7 @@
 mod auth;
 mod events_sse;
 mod ingest;
+mod session_state;
 mod store;
 
 use axum::{routing::get, Router};

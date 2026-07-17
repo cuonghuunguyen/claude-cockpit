@@ -13,7 +13,11 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, daemon_client::get_sessions])
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            daemon_client::get_sessions,
+            daemon_client::dismiss_session
+        ])
         .setup(|app| {
             // The Tauri Rust backend is the sole daemon client (SKELETON.md):
             // read the per-install token here, hand it only to Rust command

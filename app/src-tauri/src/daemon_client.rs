@@ -147,3 +147,29 @@ pub async fn get_sessions(token: tauri::State<'_, TokenState>) -> Result<Value, 
 
     resp.json::<Value>().await.map_err(|e| e.to_string())
 }
+
+/// Tauri command: POSTs the token-authed `/sessions/:id/dismiss` (D-06) so
+/// the frontend can remove a session from the active queue while keeping
+/// it in history. Consumed by the UI in Plan 01-05.
+#[tauri::command]
+pub async fn dismiss_session(
+    token: tauri::State<'_, TokenState>,
+    session_id: String,
+) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{DAEMON_BASE_URL}/sessions/{session_id}/dismiss"))
+        .bearer_auth(&token.0)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !resp.status().is_success() {
+        return Err(format!(
+            "daemon POST /sessions/{session_id}/dismiss returned {}",
+            resp.status()
+        ));
+    }
+
+    Ok(())
+}

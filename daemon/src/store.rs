@@ -376,6 +376,18 @@ pub fn dismiss_session(
     get_session(conn, session_id)
 }
 
+/// Startup rehydration query (FND-03/D-07): sessions that were still
+/// *unresolved* when the daemon last stopped — waiting on the user
+/// (`waiting-permission` / `waiting-input`) or finished but not yet
+/// acknowledged (`done`) — and not dismissed. A `running` session is
+/// deliberately excluded here: it isn't blocked on anything, and its own
+/// next hook event will simply keep it flowing; nothing needs to be
+/// manually restored for it. Dismissed sessions are excluded from the
+/// active set but remain visible via `list_sessions` (history).
+pub fn rehydrate_active_sessions(conn: &Connection) -> rusqlite::Result<Vec<SessionRow>> {
+    todo!("Task 1 RED: rehydration query not implemented yet")
+}
+
 /// Lists sessions excluded from `dismissed_at IS NOT NULL` — the active
 /// queue view (D-06/D-07). `list_sessions` (full/history) is unchanged.
 pub fn list_active_sessions(conn: &Connection) -> rusqlite::Result<Vec<SessionRow>> {
@@ -516,6 +528,39 @@ mod tests {
         append_event(&conn, "s1", "error", None, "boom", None, true).unwrap();
         let row = get_session(&conn, "s1").unwrap().unwrap();
         assert_eq!(row.status, "done", "an is_error event must never change status (D-10/MON-05)");
+    }
+
+    #[test]
+    fn rehydrate_active_sessions_returns_only_unresolved_undismissed() {
+        let conn = test_db();
+        // one done + undismissed -> should rehydrate
+        ensure_session(&conn, "s-done-undismissed", None).unwrap();
+        update_session_status(&conn, "s-done-undismissed", "done", None).unwrap();
+        // one done + dismissed -> must NOT rehydrate (history-only)
+        ensure_session(&conn, "s-done-dismissed", None).unwrap();
+        update_session_status(&conn, "s-done-dismissed", "done", None).unwrap();
+        dismiss_session(&conn, "s-done-dismissed").unwrap();
+        // one waiting-permission + undismissed -> should rehydrate
+        ensure_session(&conn, "s-waiting-undismissed", None).unwrap();
+        update_session_status(&conn, "s-waiting-undismissed", "waiting-permission", None).unwrap();
+        // one plain running + undismissed -> must NOT rehydrate (not blocked)
+        ensure_session(&conn, "s-running-undismissed", None).unwrap();
+
+        let rehydrated = rehydrate_active_sessions(&conn).unwrap();
+        let mut ids: Vec<&str> = rehydrated.iter().map(|r| r.session_id.as_str()).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["s-done-undismissed", "s-waiting-undismissed"],
+            "only unresolved + undismissed sessions should rehydrate into the active queue"
+        );
+
+        // Full/history listing still includes the dismissed session.
+        let full = list_sessions(&conn).unwrap();
+        assert!(
+            full.iter().any(|r| r.session_id == "s-done-dismissed"),
+            "dismissed session must still appear in the full/history listing"
+        );
     }
 
     #[test]

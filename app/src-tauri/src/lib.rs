@@ -1,3 +1,8 @@
+mod daemon_client;
+
+use daemon_client::TokenState;
+use tauri::Manager;
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -8,7 +13,18 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .invoke_handler(tauri::generate_handler![greet, daemon_client::get_sessions])
+        .setup(|app| {
+            // The Tauri Rust backend is the sole daemon client (SKELETON.md):
+            // read the per-install token here, hand it only to Rust command
+            // handlers via managed state, and keep the SSE consumer's
+            // re-emitted events as the webview's only path to daemon data.
+            let token = daemon_client::read_token()
+                .map_err(|e| format!("cockpit: failed to read daemon token via wsl.exe: {e}"))?;
+            app.manage(TokenState(token.clone()));
+            daemon_client::spawn_sse_consumer(app.handle().clone(), token);
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

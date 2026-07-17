@@ -63,3 +63,9 @@ npm --prefix app run build                       # Vite production bundle
 
 Full `cargo tauri dev`/`cargo tauri build` verification happens on the
 Windows side.
+
+**WSL distro name:** the Tauri backend reads the daemon's per-install token
+via `wsl.exe -d <Distro> -- bash -lc "cat ~/.cockpit/token"` at startup. It
+defaults to `$WSL_DISTRO_NAME` (falling back to `"Ubuntu"`); set
+`COCKPIT_WSL_DISTRO` before launching the Tauri app if your distro has a
+different name.

@@ -13,9 +13,11 @@
 
 use futures_util::StreamExt;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 
 /// Fixed daemon base URL — mirrors `shared/types.ts`'s `COCKPIT_DAEMON_BASE_URL`.
 /// Both native-Windows and WSL-origin traffic reach the daemon at this
@@ -57,6 +59,120 @@ impl ReachabilityState {
 impl Default for ReachabilityState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Statuses that are allowed to fire a native OS notification (NOT-01,
+/// D-05). `running` is deliberately absent — it never notifies.
+const NOTIFIABLE_STATUSES: &[&str] = &["waiting-permission", "waiting-input", "done"];
+
+/// Tauri-managed state tracking, per `session_id`, the last status a
+/// notification decision was made for. Copies the exact
+/// [`ReachabilityState`] "`Mutex`-wrapped state + `new()`/`Default`" shape
+/// (see Pattern Map). Used by [`should_notify`] to implement D-08's
+/// fire-once semantics: a notification fires only the moment a session's
+/// status *transitions into* one of [`NOTIFIABLE_STATUSES`], never on a
+/// repeated frame of the same status.
+pub struct NotificationState(Mutex<HashMap<String, String>>);
+
+impl NotificationState {
+    pub fn new() -> Self {
+        NotificationState(Mutex::new(HashMap::new()))
+    }
+}
+
+impl Default for NotificationState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// D-08 fire-once transition detection. Records `new_status` as the
+/// latest-seen status for `session_id` (so repeated frames of the same
+/// status, or a later diff, always compare against the true last-seen
+/// value) and returns `true` only when `new_status` is one of
+/// [`NOTIFIABLE_STATUSES`] AND differs from whatever was previously
+/// recorded for that `session_id` — i.e. a genuine transition *into* a
+/// notifiable state, not a repeat or a transition between two non-notifiable
+/// statuses.
+///
+/// Error frames never reach this function with a changed status at all: the
+/// daemon's `transition()` (see `daemon/src/session_state.rs`) does not
+/// change status for an `is_error` event, so an error frame's `status` is
+/// identical to the previous frame's and this naturally returns `false`
+/// (D-10/MON-05 — errors never notify).
+fn should_notify(state: &NotificationState, session_id: &str, new_status: &str) -> bool {
+    let mut map = state.0.lock().unwrap();
+    let prev = map.insert(session_id.to_string(), new_status.to_string());
+    NOTIFIABLE_STATUSES.contains(&new_status) && prev.as_deref() != Some(new_status)
+}
+
+/// Maps a notifiable status to the D-09 toast title ("the ask" — leads with
+/// *why* the toast is interrupting, per D-09's triage-first ordering).
+fn toast_title(status: &str) -> &'static str {
+    match status {
+        "waiting-permission" => "Permission needed",
+        "waiting-input" => "Waiting for input",
+        "done" => "Agent finished",
+        _ => "Claude Cockpit",
+    }
+}
+
+/// Fires a native OS toast for `value` (a parsed SSE frame) if-and-only-if
+/// this frame represents a genuine transition into a notifiable status
+/// (D-08, via [`should_notify`]). Assembles the D-09 title/body from the
+/// frame's own `sessionId`/`status`/`workspace`/`branch`/`taskSummary`
+/// fields, threading `sessionId` through as the notification's `extra`
+/// payload so a future toast-click handler (Plan 02-03) has it available.
+///
+/// Body/title are assembled as PLAIN strings only — no HTML/markup
+/// interpolation path — matching this repo's established
+/// plain-text-interpolation discipline (T-01-05f) and capping the toast to
+/// already-trusted, already-escaped daemon-derived fields (T-02-02-01).
+///
+/// All three notifiable statuses fire unconditionally in Task 1 (D-05:
+/// default-ON); Task 2 adds a settings-store gate for `waiting-input` and
+/// `done` only — `waiting-permission` must never consult the store at all
+/// (NOT-03, Pitfall 2).
+fn maybe_fire_notification(app: &AppHandle, value: &Value) {
+    let (Some(session_id), Some(status)) = (
+        value.get("sessionId").and_then(Value::as_str),
+        value.get("status").and_then(Value::as_str),
+    ) else {
+        return;
+    };
+
+    let notif_state = app.state::<NotificationState>();
+    if !should_notify(notif_state.inner(), session_id, status) {
+        return;
+    }
+
+    let workspace = value
+        .get("workspace")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown workspace");
+    let branch = value.get("branch").and_then(Value::as_str);
+    let task_summary = value.get("taskSummary").and_then(Value::as_str);
+
+    let location = match branch {
+        Some(branch) => format!("{workspace}·{branch}"),
+        None => workspace.to_string(),
+    };
+    let body = match task_summary {
+        Some(summary) if !summary.is_empty() => format!("{location}\n{summary}"),
+        _ => location,
+    };
+
+    let result = app
+        .notification()
+        .builder()
+        .title(toast_title(status))
+        .body(body)
+        .extra("sessionId", session_id)
+        .show();
+
+    if let Err(err) = result {
+        eprintln!("cockpit: failed to fire notification for session {session_id}: {err}");
     }
 }
 
@@ -247,6 +363,12 @@ fn emit_sse_frame(app: &AppHandle, frame: &str) {
         let data = data.strip_prefix(' ').unwrap_or(data);
         match serde_json::from_str::<Value>(data) {
             Ok(value) => {
+                // Transition-detect + fire BEFORE re-emitting to the
+                // webview (Pattern 2/3, Pitfall 3) — this Rust-side SSE
+                // relay is the single choke point that sees every frame in
+                // order, so detection lives here rather than in the
+                // frontend's `App.tsx` upsert/merge path.
+                maybe_fire_notification(app, &value);
                 if let Err(err) = app.emit(SESSION_EVENT_NAME, value) {
                     eprintln!("cockpit: failed to emit {SESSION_EVENT_NAME}: {err}");
                 }
@@ -328,4 +450,47 @@ pub async fn get_session_events(
     }
 
     resp.json::<Value>().await.map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    #[test]
+    fn fires_on_first_transition_into_notifiable_status() {
+        let state = NotificationState::new();
+        assert!(should_notify(&state, "s1", "waiting-permission"));
+    }
+
+    #[test]
+    fn does_not_refire_on_repeated_same_status() {
+        let state = NotificationState::new();
+        assert!(should_notify(&state, "s1", "waiting-permission"));
+        assert!(!should_notify(&state, "s1", "waiting-permission"));
+    }
+
+    #[test]
+    fn refires_after_leaving_and_reentering_a_notifiable_status() {
+        let state = NotificationState::new();
+        assert!(should_notify(&state, "s1", "waiting-permission")); // enters
+        assert!(!should_notify(&state, "s1", "waiting-permission")); // stays
+        assert!(!should_notify(&state, "s1", "running")); // leaves (not itself notifiable)
+        assert!(should_notify(&state, "s1", "waiting-permission")); // re-enters: new transition
+    }
+
+    #[test]
+    fn never_fires_for_running_status() {
+        let state = NotificationState::new();
+        assert!(!should_notify(&state, "s1", "running"));
+        assert!(!should_notify(&state, "s1", "running"));
+    }
+
+    #[test]
+    fn dedups_rapid_repeated_frames_of_the_same_status() {
+        let state = NotificationState::new();
+        assert!(should_notify(&state, "s1", "done"));
+        for _ in 0..5 {
+            assert!(!should_notify(&state, "s1", "done"));
+        }
+    }
 }

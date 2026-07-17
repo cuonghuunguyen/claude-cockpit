@@ -1,6 +1,6 @@
 mod daemon_client;
 
-use daemon_client::{ReachabilityState, TokenState};
+use daemon_client::{NotificationState, ReachabilityState, TokenState};
 use tauri::Manager;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -13,6 +13,7 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             greet,
             daemon_client::get_sessions,
@@ -26,6 +27,12 @@ pub fn run() {
             // eagerly (before the token is available) so `mark_unreachable`
             // has somewhere to record state while we're still waiting on WSL.
             app.manage(ReachabilityState::new());
+
+            // D-08 fire-once transition tracking (session_id -> last-seen
+            // status) for the notification firing gate added in
+            // `daemon_client.rs::maybe_fire_notification` — managed
+            // eagerly for the same reason as `ReachabilityState` above.
+            app.manage(NotificationState::new());
 
             // WR-01 fix: `read_token()` shells out to `wsl.exe`, which can
             // block for many seconds on a cold WSL2 VM boot. Running that

@@ -10,6 +10,9 @@ app/node_modules/
 # Frontend build output
 app/dist/
 
+# daemon-ts build output (tsup)
+daemon-ts/dist/
+
 # Tauri gitignore (kept in app/src-tauri/.gitignore too; duplicated here for
 # repo-root tooling that runs outside app/)
 app/src-tauri/gen/

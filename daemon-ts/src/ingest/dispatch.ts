@@ -26,6 +26,7 @@ import {
 import type { SessionApi } from "../store.js";
 import { timelineKind, transition } from "../sessionState.js";
 import type { HookEvent } from "../sessionState.js";
+import * as sse from "../sse.js";
 
 /**
  * Everything an ingest handler needs {@link dispatchIngestEvent} to do for
@@ -56,13 +57,18 @@ export interface IngestEventRequest {
 }
 
 /**
- * Post-mutation SSE publish seam. Wave 2 implements this as a no-op stub —
- * a zero-subscriber case is expected and not an error (mirrors
- * `ingest/mod.rs::publish_session_update`'s "best-effort" semantics). Wave
- * 3 wires this one call site to `sse.publish(api)`.
+ * Post-mutation SSE publish seam — the one call site every mutating ingest
+ * path (and `routes.ts`'s dismiss handler) funnels through. Best-effort: a
+ * zero-subscriber case is a valid no-op, mirroring
+ * `ingest/mod.rs::publish_session_update`'s `Sender::send` (which only
+ * errors when there are zero receivers, an error this daemon never
+ * surfaces). `api` is `null` only when a caller could not re-fetch the row
+ * (defensive; never happens on the paths that call this today).
  */
-export function publishSessionUpdate(_api: SessionApi | null): void {
-  // intentionally a no-op in Wave 2 — SSE wiring lands in Wave 3.
+export function publishSessionUpdate(api: SessionApi | null): void {
+  if (api) {
+    sse.publish(api);
+  }
 }
 
 /**

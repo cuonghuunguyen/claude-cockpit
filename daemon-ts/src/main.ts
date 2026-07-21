@@ -5,10 +5,8 @@
  * Binds `0.0.0.0:9427` inside WSL, generates/loads a per-install CSPRNG
  * token, opens a WAL-mode SQLite store on the WSL-native filesystem, and
  * wires the token-gated read routes (`/sessions`, `/sessions?active=true`,
- * `/sessions/:id/events`). Port of `daemon/src/main.rs`.
- *
- * Ingest (`POST /hooks/*`), dismiss, and the `/events` SSE stream are
- * Wave 2/3 — not wired here.
+ * `/sessions/:id/events`), the ingest (`POST /hooks/*`) and dismiss routes,
+ * and the `/events` SSE stream. Port of `daemon/src/main.rs`.
  */
 
 import { randomBytes } from "node:crypto";

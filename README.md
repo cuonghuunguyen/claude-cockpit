@@ -23,7 +23,8 @@ architectural contract this repo implements.
 ## Directory Layout
 
 ```
-daemon/            Rust binary (axum + tokio), runs INSIDE WSL2
+daemon-ts/          Node/TypeScript daemon (fastify + better-sqlite3), runs INSIDE WSL2
+daemon-rust-archived/  Retired Rust daemon crate (archived, D-07 — not built/run)
 shared/             Shared type contracts (shared/types.ts) consumed by the frontend
 app/                Tauri v2 desktop shell (Windows-native)
   src-tauri/        Rust backend: tray icon, daemon client, notifications
@@ -40,8 +41,8 @@ Two halves run on two sides of the WSL/Windows boundary:
 
 ```bash
 # 1. WSL side — run the daemon (this is where it must live; see table above)
-cargo build --manifest-path daemon/Cargo.toml
-cargo run --manifest-path daemon/Cargo.toml
+npm --prefix daemon-ts run build
+node daemon-ts/dist/main.js
 
 # 2. Windows side — run the Tauri desktop app (compiles the React/Vite
 #    frontend automatically via beforeDevCommand)
@@ -57,8 +58,8 @@ installed, build and verify the daemon and frontend independently instead of
 a bare `cargo build` at the workspace root:
 
 ```bash
-cargo build --manifest-path daemon/Cargo.toml   # Rust daemon
-npm --prefix app run build                       # Vite production bundle
+npm --prefix daemon-ts run build   # Node/TypeScript daemon
+npm --prefix app run build          # Vite production bundle
 ```
 
 Full `cargo tauri dev`/`cargo tauri build` verification happens on the

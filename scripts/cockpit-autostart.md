@@ -11,8 +11,13 @@ Run once, from an elevated or non-elevated Windows PowerShell session (task
 registration for the current user does not require elevation):
 
 ```powershell
-.\scripts\register-task-scheduler.ps1 -DaemonPath "/home/<user>/claude-cockpit/target/debug/cockpit-daemon"
+.\scripts\register-task-scheduler.ps1 -DaemonPath "node /home/<user>/claude-cockpit/daemon-ts/dist/main.js"
 ```
+
+(Since Phase 2.1's D-07 retirement, the daemon is the Node/TypeScript build at
+`daemon-ts/dist/main.js`, not the retired Rust `target/debug/cockpit-daemon`
+binary. Run `npm --prefix daemon-ts run build` inside WSL first so `dist/`
+exists.)
 
 `-Distro` defaults to `$env:WSL_DISTRO_NAME` if that's set in your shell,
 else `"Ubuntu"` — pass `-Distro <name>` explicitly if your distro has a
@@ -109,14 +114,22 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/home/<user>/claude-cockpit/target/debug/cockpit-daemon
+ExecStart=/home/<user>/.nvm/versions/node/v24.14.0/bin/node /home/<user>/claude-cockpit/daemon-ts/dist/main.js
 Restart=on-failure
 RestartSec=2
-Environment=RUST_LOG=info
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+(Since Phase 2.1's D-07 retirement, `ExecStart` runs the Node/TypeScript
+daemon, not the retired Rust binary. Use an absolute path to `node` —
+systemd units don't source `nvm.sh`/shell rc files, so a bare `node` on
+`$PATH` will not resolve; find yours with `command -v node` inside a WSL
+shell where `nvm use 24` has run. The old `Environment=RUST_LOG=info` line
+is Rust-specific and has been removed — it would be a harmless no-op env
+var for the Node process if left in place, but there's nothing in
+daemon-ts that reads it.)
 
 ```bash
 sudo systemctl enable --now cockpit-daemon.service

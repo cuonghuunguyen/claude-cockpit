@@ -36,11 +36,13 @@
     must pass this explicitly), then falls back to "Ubuntu".
 
 .PARAMETER DaemonPath
-    Absolute path to the Cockpit daemon binary, INSIDE the WSL distro's own
-    filesystem (e.g. "/home/<user>/claude-cockpit/target/debug/cockpit-daemon",
-    or the release build path once packaged). Never a /mnt/c/... path — see
-    RESEARCH.md Pitfall D (unrelated to this script, but the same
-    WSL-native-filesystem discipline applies to the binary too).
+    Shell command that launches the Cockpit daemon, INSIDE the WSL distro's
+    own filesystem. Since Phase 2.1's D-07 retirement, this is the Node
+    daemon entrypoint (e.g.
+    "node /home/<user>/claude-cockpit/daemon-ts/dist/main.js"), NOT the
+    retired Rust binary path. Never a /mnt/c/... path — see RESEARCH.md
+    Pitfall D (unrelated to this script, but the same WSL-native-filesystem
+    discipline applies to the daemon's working directory/DB too).
 
 .PARAMETER TaskName
     Name of the registered Scheduled Task. Default: "CockpitDaemonAutostart".
@@ -70,12 +72,12 @@
 
 .EXAMPLE
     # Default: run only when logged on (no stored credential) — Ubuntu distro
-    .\register-task-scheduler.ps1 -DaemonPath "/home/dev/claude-cockpit/target/debug/cockpit-daemon"
+    .\register-task-scheduler.ps1 -DaemonPath "node /home/dev/claude-cockpit/daemon-ts/dist/main.js"
 
 .EXAMPLE
     # Opt-in: run whether logged on or not (daemon up before first interactive logon)
     $cred = Get-Credential -UserName $env:USERNAME
-    .\register-task-scheduler.ps1 -DaemonPath "/home/dev/claude-cockpit/target/debug/cockpit-daemon" `
+    .\register-task-scheduler.ps1 -DaemonPath "node /home/dev/claude-cockpit/daemon-ts/dist/main.js" `
         -RunWhetherLoggedOnOrNot -UserId $cred.UserName -Password $cred.Password
 #>
 

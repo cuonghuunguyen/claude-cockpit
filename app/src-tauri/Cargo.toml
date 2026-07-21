@@ -29,4 +29,9 @@ reqwest = { version = "0.13.4", default-features = false, features = ["json", "s
 # (daemon_client.rs). axum/reqwest don't publicly re-export the Stream
 # trait's extension methods; this is the standard minimal crate for it.
 futures-util = "0.3"
+# tokio::time::sleep for the SSE consumer's reconnect backoff
+# (daemon_client.rs). Only present transitively via tauri/reqwest, so it must
+# be a direct dependency for the `tokio::` path to resolve; `time` is the only
+# feature used here (async_runtime::spawn comes from tauri, not tokio directly).
+tokio = { version = "1", features = ["time"] }
 

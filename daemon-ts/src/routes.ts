@@ -11,7 +11,15 @@ import type { FastifyInstance } from "fastify";
 import type { Database as DatabaseType } from "better-sqlite3";
 
 import { requireToken } from "./auth.js";
-import { dismissSession, getSessionApi, isTruthy, listSessionEvents, listSessions } from "./store.js";
+import {
+  dismissSession,
+  getSession,
+  getSessionApi,
+  isTruthy,
+  listSessionEvents,
+  listSessions,
+  updateSessionStatus,
+} from "./store.js";
 import { publishSessionUpdate } from "./ingest/dispatch.js";
 import * as sse from "./sse.js";
 import { makeSessionStartHandler } from "./ingest/sessionStart.js";
@@ -138,6 +146,28 @@ export function registerRoutes(app: FastifyInstance, db: DatabaseType, token: st
       const sessionId = req.params.id;
       const kind = getPendingDecisionKind(sessionId);
       if (!kind) {
+        // No live hold for this session in the in-memory registry, yet the
+        // client card believed a decision was still pending (it submitted
+        // one) -- an ORPHANED HOLD. This happens when the registry entry is
+        // gone but the SQL-persisted status is still `waiting-permission`:
+        // either the daemon restarted (dev `tsx watch` wipes the in-memory
+        // registry on every file save) or the hold's own ~585s timeout
+        // already elapsed. In both cases the underlying hook process has
+        // already released to native (or will, on its own timeout), so the
+        // tool call is no longer actually blocked on us -- but the card keeps
+        // rendering live-looking Approve/Deny controls that can only ever
+        // 404. Reconcile the stored status back off `waiting-permission` (to
+        // `running`, the same underlying state `beginPermissionHold` had
+        // overridden -- see `sessionState.ts`/`store.ts`; this reuses the
+        // existing `updateSessionStatus` writer rather than inventing a new
+        // transition) and publish, so the next SSE frame clears the dead
+        // controls. Guarded on the current status: a 404 for an
+        // already-done/unknown session must never resurrect it to `running`.
+        const row = getSession(db, sessionId);
+        if (row && row.status === "waiting-permission") {
+          updateSessionStatus(db, sessionId, "running", null);
+          publishSessionUpdate(getSessionApi(db, sessionId));
+        }
         reply.code(404).send();
         return;
       }

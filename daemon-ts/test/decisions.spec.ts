@@ -24,7 +24,10 @@ import type { Database as DatabaseType } from "better-sqlite3";
 
 import { buildApp } from "../src/main.js";
 import { openDb } from "../src/store.js";
-import { __setDefaultTimeoutMsForTests, hasPendingDecision } from "../src/decisions.js";
+import {
+  __setDefaultTimeoutMsForTests,
+  hasPendingDecision,
+} from "../src/decisions.js";
 
 const TEST_TOKEN = "decisions-test-token-0123456789abcdef012345";
 const auth = (r: supertest.Test) => r.set("Authorization", `Bearer ${TEST_TOKEN}`);
@@ -395,5 +398,77 @@ describe("hold-open decision loop (held POST /hooks/pre-tool-use, resolved by PO
 
     await auth(supertest(app.server).post("/sessions/hold-detail/decision")).send({ type: "approve" });
     await held;
+  });
+
+  // Defect B (orphaned-hold reconciliation): once the in-memory registry
+  // entry is gone (daemon restart via `tsx watch`, or the ~585s hold timeout
+  // elapsing) but the SQL-persisted status is still `waiting-permission`, the
+  // card keeps rendering live-looking Approve/Deny controls that can only
+  // 404 forever. A 404 on POST /sessions/:id/decision must ALSO reconcile the
+  // stored status off `waiting-permission` so the card clears itself.
+  it("orphaned hold: a 404 decision POST reconciles the stored status off waiting-permission (card stops offering dead controls)", async () => {
+    // Reproduce the orphaned-hold state the same way it occurs in production:
+    // the in-memory pending-decision entry disappears (here via the injected
+    // short timeout) while the persisted status stays `waiting-permission`.
+    __setDefaultTimeoutMsForTests(30);
+    await startSession("orphan-hold");
+
+    const held = sendNow(
+      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
+        session_id: "orphan-hold",
+        tool_name: "Bash",
+        tool_input: { command: "echo orphan" },
+      }),
+    );
+
+    // Let the hold register and then time out — the registry entry is removed
+    // (release-to-native `{}`), but nothing clears the persisted status.
+    const heldRes = await held;
+    expect(heldRes.body).toEqual({});
+    expect(hasPendingDecision("orphan-hold")).toBe(false);
+
+    // Precondition: the card still LOOKS live — status persisted as
+    // waiting-permission, so the derived pendingDecision is non-null.
+    const before = await auth(supertest(app.server).get("/sessions?active=true"));
+    const beforeSession = (
+      before.body as Array<{ sessionId: string; status: string; pendingDecision: unknown }>
+    ).find((s) => s.sessionId === "orphan-hold");
+    expect(beforeSession?.status).toBe("waiting-permission");
+    expect(beforeSession?.pendingDecision).not.toBeNull();
+
+    // The stale Approve click: no live hold -> 404, but the daemon now ALSO
+    // reconciles the stored status off waiting-permission.
+    const staleApprove = await auth(supertest(app.server).post("/sessions/orphan-hold/decision")).send({
+      type: "approve",
+    });
+    expect(staleApprove.status).toBe(404);
+
+    // The card no longer offers dead controls: status reconciled back to
+    // `running`, pendingDecision cleared.
+    const after = await auth(supertest(app.server).get("/sessions?active=true"));
+    const afterSession = (
+      after.body as Array<{ sessionId: string; status: string; pendingDecision: unknown }>
+    ).find((s) => s.sessionId === "orphan-hold");
+    expect(afterSession?.status).toBe("running");
+    expect(afterSession?.pendingDecision).toBeNull();
+  });
+
+  it("a 404 decision POST for a session that is NOT waiting-permission never resurrects it (a done session stays done)", async () => {
+    await startSession("orphan-done");
+    // Drive the session to `done` via a real Stop event.
+    await auth(supertest(app.server).post("/hooks/stop")).send({ session_id: "orphan-done" });
+    expect(hasPendingDecision("orphan-done")).toBe(false);
+
+    const res = await auth(supertest(app.server).post("/sessions/orphan-done/decision")).send({
+      type: "approve",
+    });
+    expect(res.status).toBe(404);
+
+    // The reconciliation guard must not flip a done session to running.
+    const after = await auth(supertest(app.server).get("/sessions"));
+    const afterSession = (after.body as Array<{ sessionId: string; status: string }>).find(
+      (s) => s.sessionId === "orphan-done",
+    );
+    expect(afterSession?.status).toBe("done");
   });
 });

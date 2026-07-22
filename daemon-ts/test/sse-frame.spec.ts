@@ -33,6 +33,7 @@ const SAMPLE_API: SessionApi = {
   endedAt: null,
   dismissedAt: null,
   source: "startup",
+  pendingDecision: null,
 };
 
 describe("sse.ts encodeFrame (byte-exact framing)", () => {

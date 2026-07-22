@@ -18,6 +18,7 @@ import { readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
+import type { PendingDecision } from "../../shared/types.js";
 
 /**
  * Opens (or creates) the SQLite database at `path`, enables WAL mode, and
@@ -100,6 +101,33 @@ export interface SessionApi {
   endedAt: string | null;
   dismissedAt: string | null;
   source: string | null;
+  /** FND-04/ACT-01: the pending ask this session is currently holding open, derived from `status`/`currentTool` (never persisted separately). */
+  pendingDecision: PendingDecision | null;
+}
+
+/**
+ * Derives the wire-facing {@link PendingDecision} for a `waiting-permission`
+ * session (this plan's only `kind`; `ask-user-question`/`plan-mode` are
+ * 03-03/03-05). `null` for every other status — the card/toast render
+ * nothing when there is no held decision. Options mirror `decisions.ts`'s
+ * `buildHookDecisionOutput("permission", ...)` contract: Approve carries a
+ * plain `{type:"approve"}` Decision; Deny carries `{type:"deny"}` with
+ * `revealReasonOnSelect` so the UI expands a reason box before submitting
+ * (D-09) rather than submitting an empty-reason deny immediately.
+ */
+function derivePendingDecision(row: SessionRow): PendingDecision | null {
+  if (row.status !== "waiting-permission") {
+    return null;
+  }
+  return {
+    kind: "permission",
+    toolName: row.currentTool,
+    prompt: row.currentTool ? `Approve ${row.currentTool}?` : "Approve this tool call?",
+    options: [
+      { label: "Approve", decision: { type: "approve" } },
+      { label: "Deny", decision: { type: "deny" }, revealReasonOnSelect: true },
+    ],
+  };
 }
 
 /**
@@ -126,6 +154,7 @@ function toSessionApi(row: SessionRow): SessionApi {
     dismissedAt:
       row.dismissedAt === null || row.dismissedAt === undefined ? null : millisToRfc3339(row.dismissedAt),
     source: row.source,
+    pendingDecision: derivePendingDecision(row),
   };
 }
 
@@ -395,6 +424,28 @@ export function updateSessionStatus(
   db.prepare(
     `UPDATE sessions SET status = ?, current_tool = ?, last_activity_at = ? WHERE session_id = ?`,
   ).run(status, currentTool, nowMillis(), sessionId);
+}
+
+/**
+ * Hold-begin status writer (FND-04, 03-RESEARCH.md Pitfall 3): same
+ * UPDATE shape as {@link updateSessionStatus} (status + current_tool +
+ * last_activity_at together, one statement), but invoked directly by
+ * `sessionState.ts::beginPermissionHold` at the exact moment an ingest
+ * handler decides a `PreToolUse` call is now a held decision — NOT via the
+ * event-driven `dispatchIngestEvent`/`transition()` path, whose pure
+ * `PreToolUse -> "running"` mapping has no concept of "this call is blocked
+ * pending a human" (see `sessionState.ts` for why this is a separate
+ * call-site rather than a new `transition()` match arm).
+ */
+export function setStatusForHold(
+  db: DatabaseType,
+  sessionId: string,
+  status: string,
+  toolName: string | null,
+): void {
+  db.prepare(
+    `UPDATE sessions SET status = ?, current_tool = ?, last_activity_at = ? WHERE session_id = ?`,
+  ).run(status, toolName, nowMillis(), sessionId);
 }
 
 /**

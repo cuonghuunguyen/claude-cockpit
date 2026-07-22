@@ -38,7 +38,12 @@ describe("hold-open decision loop (held POST /hooks/pre-tool-use, resolved by PO
     tmpDir = mkdtempSync(join(tmpdir(), "cockpit-decisions-test-"));
     db = openDb(join(tmpDir, "cockpit.db"));
     app = buildApp(db, TEST_TOKEN);
-    await app.ready();
+    // Explicit listen (mirrors test/sse-route.spec.ts) rather than
+    // `app.ready()` — concurrent held requests each drive supertest to
+    // dispatch real sockets against `app.server`, and supertest's own
+    // lazy `listen(0)` would otherwise race across two simultaneous
+    // requests fired before the server has an address yet.
+    await app.listen({ port: 0, host: "127.0.0.1" });
   });
 
   afterEach(async () => {
@@ -56,6 +61,26 @@ describe("hold-open decision loop (held POST /hooks/pre-tool-use, resolved by PO
     });
   }
 
+  /**
+   * Fires a supertest `Test` request immediately via its own `.end()` —
+   * NOT `await`/`.then()`. superagent's `Request` only actually dispatches
+   * the HTTP call once `.then()`/`.end()` is invoked, so a plain
+   * `const p = auth(supertest(...).post(...)).send(...)` assigned without
+   * awaiting/then-ing would never actually reach the server, which matters
+   * here because the whole point is to start a held request and inspect
+   * server-side state (`hasPendingDecision`) WHILE it is still in flight.
+   * Returns a genuine `Promise` the test can `await` later, once the held
+   * response has been resolved server-side.
+   */
+  function sendNow(reqBuilder: supertest.Test): Promise<supertest.Response> {
+    return new Promise((resolve, reject) => {
+      reqBuilder.end((err, res) => {
+        if (err) reject(err);
+        else resolve(res);
+      });
+    });
+  }
+
   /** Small tick so the held request has actually registered its pending
    * decision before the test issues the resolving/inspecting call. */
   const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -63,11 +88,13 @@ describe("hold-open decision loop (held POST /hooks/pre-tool-use, resolved by PO
   it("held PreToolUse resolves only after POST /sessions/:id/decision, with the built approve JSON", async () => {
     await startSession("hold-approve");
 
-    const held = auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-      session_id: "hold-approve",
-      tool_name: "Bash",
-      tool_input: { command: "rm -rf /tmp/x" },
-    });
+    const held = sendNow(
+      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
+        session_id: "hold-approve",
+        tool_name: "Bash",
+        tool_input: { command: "rm -rf /tmp/x" },
+      }),
+    );
     await tick();
     expect(hasPendingDecision("hold-approve")).toBe(true);
 
@@ -89,11 +116,13 @@ describe("hold-open decision loop (held POST /hooks/pre-tool-use, resolved by PO
   it("deny with a reason returns deny JSON carrying permissionDecisionReason", async () => {
     await startSession("hold-deny-reason");
 
-    const held = auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-      session_id: "hold-deny-reason",
-      tool_name: "Bash",
-      tool_input: { command: "rm -rf /tmp/x" },
-    });
+    const held = sendNow(
+      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
+        session_id: "hold-deny-reason",
+        tool_name: "Bash",
+        tool_input: { command: "rm -rf /tmp/x" },
+      }),
+    );
     await tick();
 
     await auth(supertest(app.server).post("/sessions/hold-deny-reason/decision")).send({
@@ -114,11 +143,13 @@ describe("hold-open decision loop (held POST /hooks/pre-tool-use, resolved by PO
   it("deny with an absent/whitespace-only reason omits permissionDecisionReason entirely", async () => {
     await startSession("hold-deny-empty");
 
-    const held = auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-      session_id: "hold-deny-empty",
-      tool_name: "Bash",
-      tool_input: { command: "rm -rf /tmp/x" },
-    });
+    const held = sendNow(
+      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
+        session_id: "hold-deny-empty",
+        tool_name: "Bash",
+        tool_input: { command: "rm -rf /tmp/x" },
+      }),
+    );
     await tick();
 
     await auth(supertest(app.server).post("/sessions/hold-deny-empty/decision")).send({
@@ -142,16 +173,20 @@ describe("hold-open decision loop (held POST /hooks/pre-tool-use, resolved by PO
     await startSession("hold-a");
     await startSession("hold-b");
 
-    const heldA = auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-      session_id: "hold-a",
-      tool_name: "Bash",
-      tool_input: { command: "echo a" },
-    });
-    const heldB = auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-      session_id: "hold-b",
-      tool_name: "Bash",
-      tool_input: { command: "echo b" },
-    });
+    const heldA = sendNow(
+      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
+        session_id: "hold-a",
+        tool_name: "Bash",
+        tool_input: { command: "echo a" },
+      }),
+    );
+    const heldB = sendNow(
+      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
+        session_id: "hold-b",
+        tool_name: "Bash",
+        tool_input: { command: "echo b" },
+      }),
+    );
     await tick();
 
     expect(hasPendingDecision("hold-a")).toBe(true);
@@ -180,11 +215,13 @@ describe("hold-open decision loop (held POST /hooks/pre-tool-use, resolved by PO
     expect([404, 409]).toContain(noHold.status);
 
     await startSession("hold-once");
-    const held = auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-      session_id: "hold-once",
-      tool_name: "Bash",
-      tool_input: { command: "echo once" },
-    });
+    const held = sendNow(
+      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
+        session_id: "hold-once",
+        tool_name: "Bash",
+        tool_input: { command: "echo once" },
+      }),
+    );
     await tick();
 
     const first = await auth(supertest(app.server).post("/sessions/hold-once/decision")).send({
@@ -203,11 +240,13 @@ describe("hold-open decision loop (held POST /hooks/pre-tool-use, resolved by PO
     __setDefaultTimeoutMsForTests(30);
     await startSession("hold-timeout");
 
-    const held = auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-      session_id: "hold-timeout",
-      tool_name: "Bash",
-      tool_input: { command: "echo timeout" },
-    });
+    const held = sendNow(
+      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
+        session_id: "hold-timeout",
+        tool_name: "Bash",
+        tool_input: { command: "echo timeout" },
+      }),
+    );
 
     const heldRes = await held;
     expect(heldRes.body).toEqual({});
@@ -217,11 +256,13 @@ describe("hold-open decision loop (held POST /hooks/pre-tool-use, resolved by PO
   it("dismiss path: POST /sessions/:id/dismiss while held resolves to an empty decision and removes the card from the active queue", async () => {
     await startSession("hold-dismiss");
 
-    const held = auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-      session_id: "hold-dismiss",
-      tool_name: "Bash",
-      tool_input: { command: "echo dismiss" },
-    });
+    const held = sendNow(
+      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
+        session_id: "hold-dismiss",
+        tool_name: "Bash",
+        tool_input: { command: "echo dismiss" },
+      }),
+    );
     await tick();
     expect(hasPendingDecision("hold-dismiss")).toBe(true);
 

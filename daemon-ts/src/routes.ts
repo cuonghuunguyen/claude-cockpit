@@ -21,6 +21,13 @@ import { makePostToolUseHandler } from "./ingest/postToolUse.js";
 import { makeNotificationHandler } from "./ingest/notification.js";
 import { makeStopHandler } from "./ingest/stop.js";
 import { makeSessionEndHandler } from "./ingest/sessionEnd.js";
+import {
+  buildHookDecisionOutput,
+  getPendingDecisionKind,
+  releasePendingDecisionOnDismiss,
+  resolvePendingDecision,
+} from "./decisions.js";
+import type { Decision } from "../../shared/types.js";
 
 interface ListSessionsQuery {
   /** `?active=true` (or `1`/`TRUE`/`yes`) restricts to the active queue. */
@@ -93,7 +100,13 @@ export function registerRoutes(app: FastifyInstance, db: DatabaseType, token: st
     });
   });
 
-  /** `POST /sessions/:id/dismiss` (D-06): 200 if found, 404 if unknown. */
+  /**
+   * `POST /sessions/:id/dismiss` (D-06): 200 if found, 404 if unknown. Also
+   * releases a held decision (D-03(c)): dismissing a card while it is
+   * holding a `PreToolUse` response open resolves that hold to an empty
+   * decision, which `hook-client/pretooluse-wrapper.cjs` forwards as
+   * release-to-native.
+   */
   app.post<{ Params: SessionIdParams }>(
     "/sessions/:id/dismiss",
     { preHandler: auth },
@@ -103,7 +116,49 @@ export function registerRoutes(app: FastifyInstance, db: DatabaseType, token: st
         reply.code(404).send();
         return;
       }
+      releasePendingDecisionOnDismiss(req.params.id);
       publishSessionUpdate(getSessionApi(db, req.params.id));
+      reply.code(200).send();
+    },
+  );
+
+  /**
+   * `POST /sessions/:id/decision` (FND-04/ACT-01/ACT-03, D-04): resolves a
+   * held `PreToolUse` response with the client-submitted {@link Decision}.
+   * Mirrors the `dismiss` route's app->daemon POST pattern (03-RESEARCH.md,
+   * `<assumption_delta_decision>`). 404/409 (T-03-02) when no pending entry
+   * exists for `:id` — including a second POST after the hold already
+   * resolved, timed out, or was dismissed; `resolvePendingDecision` is the
+   * one-shot idempotent choke point that guarantees this.
+   */
+  app.post<{ Params: SessionIdParams; Body: Decision }>(
+    "/sessions/:id/decision",
+    { preHandler: auth },
+    async (req, reply) => {
+      const sessionId = req.params.id;
+      const kind = getPendingDecisionKind(sessionId);
+      if (!kind) {
+        reply.code(404).send();
+        return;
+      }
+
+      let outputJson: unknown;
+      try {
+        outputJson = buildHookDecisionOutput(kind, req.body);
+      } catch (err) {
+        reply.code(400).send({ error: (err as Error).message });
+        return;
+      }
+
+      const resolved = resolvePendingDecision(sessionId, outputJson);
+      if (!resolved) {
+        // Lost a race against the registry's own timeout/dismiss between
+        // the getPendingDecisionKind check above and here.
+        reply.code(409).send();
+        return;
+      }
+
+      publishSessionUpdate(getSessionApi(db, sessionId));
       reply.code(200).send();
     },
   );

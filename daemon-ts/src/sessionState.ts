@@ -1,17 +1,29 @@
 /**
  * Pure hook-event -> session-status transition model (MON-01) and
  * timeline-kind mapping (MON-03). Port of `daemon/src/session_state.rs`
- * (whole file, 174 lines) — intentionally side-effect-free (no imports of
- * store/fs/http): callers (the ingest handlers, via `ingest/dispatch.ts`)
- * are responsible for actually persisting the result and appending the
- * matching timeline entry.
+ * (whole file, 174 lines) — `transition()`/`classifyNotification()` remain
+ * intentionally side-effect-free (no imports of store/fs/http): callers (the
+ * ingest handlers, via `ingest/dispatch.ts`) are responsible for actually
+ * persisting the result and appending the matching timeline entry.
  *
  * The `Notification` classifier is centrally defined here (a single
  * switch) precisely because the exact `notification_type` string values
  * were unconfirmed pending live-install validation (Phase 1 Open Question)
  * — when real traffic is observed, only this one function needs
  * correcting.
+ *
+ * `beginPermissionHold` (03-01, FND-04) is a deliberate, narrow exception to
+ * the "no store import" rule above: it is a call-site helper, NOT a new
+ * `transition()` match arm (03-RESEARCH.md Pitfall 3) — `transition()`'s
+ * contract is "given only the raw hook event name," which has no way to
+ * express "this particular PreToolUse call is now blocked pending a human."
+ * `ingest/preToolUse.ts` calls this directly, overriding whatever
+ * `transition()` already computed (`PreToolUse` -> `"running"`) the moment
+ * it decides a decision is needed.
  */
+
+import { setStatusForHold } from "./store.js";
+import type { Database as DatabaseType } from "better-sqlite3";
 
 /**
  * The enumerated hook events this daemon consumes. `SessionStart` is
@@ -121,4 +133,16 @@ export function timelineKind(event: HookEvent): string | null {
     case "SessionEnd":
       return null;
   }
+}
+
+/**
+ * Hold-begin call-site (FND-04): sets the session to `waiting-permission`
+ * immediately, at the exact moment `ingest/preToolUse.ts` decides a
+ * `PreToolUse` call needs an interactive decision — see the module doc
+ * comment above for why this is a separate call-site rather than a
+ * `transition()` match arm. Callers must `publishSessionUpdate()`
+ * immediately after this so the card reflects the hold without delay.
+ */
+export function beginPermissionHold(db: DatabaseType, sessionId: string, toolName: string | null): void {
+  setStatusForHold(db, sessionId, "waiting-permission", toolName);
 }

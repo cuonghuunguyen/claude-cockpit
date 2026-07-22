@@ -163,11 +163,20 @@ describe("ingest routes (real Fastify instance + real on-disk SQLite temp file)"
       session_id: "life1",
       prompt: "build the dashboard",
     });
-    await auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-      session_id: "life1",
-      tool_name: "Bash",
-      tool_input: { command: "ls" },
+
+    // "Bash" is a decision-requiring tool (03-01, FND-04): PreToolUse now
+    // holds the response open until POST /sessions/:id/decision resolves
+    // it. Fire it without awaiting yet (so it can actually hold), approve
+    // it, THEN await the held response before continuing the lifecycle.
+    const heldPreToolUse = new Promise<supertest.Response>((resolve, reject) => {
+      auth(supertest(app.server).post("/hooks/pre-tool-use"))
+        .send({ session_id: "life1", tool_name: "Bash", tool_input: { command: "ls" } })
+        .end((err, res) => (err ? reject(err) : resolve(res)));
     });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await auth(supertest(app.server).post("/sessions/life1/decision")).send({ type: "approve" });
+    await heldPreToolUse;
+
     await auth(supertest(app.server).post("/hooks/post-tool-use")).send({
       session_id: "life1",
       tool_name: "Bash",

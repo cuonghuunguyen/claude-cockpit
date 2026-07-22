@@ -43,6 +43,57 @@ export type SessionStatus =
   | "done";
 
 /**
+ * Discriminates which hook-decision contract a {@link PendingDecision}
+ * belongs to (03-RESEARCH.md Pattern 2/3/4):
+ * - `permission`        — an ordinary `PreToolUse` allow/deny (this plan,
+ *   03-01).
+ * - `ask-user-question` — `AskUserQuestion`'s answer-injection contract
+ *   (03-03).
+ * - `plan-mode`          — the `PermissionRequest`/`ExitPlanMode` 3-way
+ *   contract (03-05).
+ */
+export type DecisionKind = "permission" | "ask-user-question" | "plan-mode";
+
+/**
+ * The ONE general session-decision abstraction every response surface
+ * (in-app card controls, the toast window) round-trips — see this phase's
+ * `<assumption_delta_decision>` (03-01-PLAN.md): a single discriminated
+ * union rather than three parallel ad-hoc code paths. The daemon owns the
+ * single mapping `Decision + PendingDecision.kind -> hookSpecificOutput JSON`
+ * (`buildHookDecisionOutput` in `daemon-ts/src/decisions.ts`). This plan
+ * (03-01) implements only the `approve`/`deny` variants end-to-end; the
+ * remaining variants are reserved for 03-03/03-05.
+ */
+export type Decision =
+  | { type: "approve" }
+  | { type: "deny"; reason?: string }
+  | { type: "answer"; labels: string[] }
+  | { type: "plan-allow" }
+  | { type: "plan-allow-accept-edits" }
+  | { type: "plan-deny"; message?: string };
+
+/** One selectable response option rendered by the card/toast for a pending decision. */
+export interface PendingOption {
+  label: string;
+  description?: string;
+  decision: Decision;
+  /** True when selecting this option should reveal a free-text reason box (ACT-03, D-09) rather than submitting immediately. */
+  revealReasonOnSelect?: boolean;
+}
+
+/**
+ * The pending ask a held session is waiting on, surfaced on {@link Session}
+ * so the card/toast can render it without a second round-trip. `null` means
+ * the session is not currently holding a decision open.
+ */
+export interface PendingDecision {
+  kind: DecisionKind;
+  toolName: string | null;
+  prompt: string;
+  options: PendingOption[];
+}
+
+/**
  * A single Claude Code session, keyed by its stable `session_id` across the
  * session's whole lifecycle and across all three origin environments (WSL
  * shell, native Windows terminal, VS Code integrated terminal).
@@ -74,6 +125,13 @@ export interface Session {
   dismissedAt: string | null;
   /** Which environment this session originated from. */
   source: "wsl" | "windows" | "vscode";
+  /**
+   * The pending ask this session is currently holding open (FND-04/ACT-01),
+   * or `null` when nothing is held. Derived server-side from `status` +
+   * `currentTool` — never persisted separately (daemon-ts/src/store.ts's
+   * `getSessionApi`).
+   */
+  pendingDecision: PendingDecision | null;
 }
 
 /** Discriminates the kind of entry appearing in a session's timeline. */

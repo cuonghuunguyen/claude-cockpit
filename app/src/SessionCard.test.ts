@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildDecisionPayload, decisionDetailText } from "./SessionCard";
+import {
+  buildDecisionPayload,
+  decisionDetailText,
+  shouldClearOptimisticDecision,
+} from "./SessionCard";
 import type { PendingDecision } from "../../shared/types";
 
 describe("buildDecisionPayload (ACT-01/ACT-03 decision-payload construction)", () => {
@@ -75,5 +79,23 @@ describe("decisionDetailText (defect-B fix: card must show WHICH tool/command is
 
   it("returns null when neither toolName nor toolInputSummary is present", () => {
     expect(decisionDetailText(makePending({ toolName: null, toolInputSummary: null }))).toBeNull();
+  });
+});
+
+describe("shouldClearOptimisticDecision (fixes: card stuck at 'Approved — unblocking…' + Done badge forever)", () => {
+  const livePendingDecision: PendingDecision = {
+    kind: "permission",
+    toolName: "Bash",
+    toolInputSummary: '{"command":"rm -rf /tmp/x"}',
+    prompt: "Approve Bash?",
+    options: [],
+  };
+
+  it("returns true once the daemon reports no pending decision (hold consumed/timed out/dismissed)", () => {
+    expect(shouldClearOptimisticDecision(null)).toBe(true);
+  });
+
+  it("returns false while a pending decision is still live for this session", () => {
+    expect(shouldClearOptimisticDecision(livePendingDecision)).toBe(false);
   });
 });

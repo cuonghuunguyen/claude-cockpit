@@ -53,6 +53,34 @@ export function buildDecisionPayload(
   return trimmed ? { type: "deny", reason: trimmed } : { type: "deny" };
 }
 
+/**
+ * Debug fix (stuck "Approved — unblocking…" + "Done" badge shown forever):
+ * decides whether the card's local optimistic decision state
+ * (`resolved`/`denyRevealed`/`denyReasonText`/`respondError` — set the
+ * instant Approve/Deny succeeds, per D-10) should be cleared back to its
+ * initial "no decision pending" shape.
+ *
+ * `true` once the daemon's own record confirms there is no longer a pending
+ * decision for this session (`pendingDecision` is `null` — the hold was
+ * consumed, timed out, or dismissed, and a later hook event, e.g. `Stop`/
+ * `SubagentStop`, has moved `status` off `waiting-permission`).
+ *
+ * Without this reconciliation the local override never clears — despite the
+ * `submitDecision` doc comment's claim that "the real reconciliation happens
+ * when the next... SSE frame... updates `session.pendingDecision`... at
+ * which point this component simply re-renders from the fresh prop," no
+ * effect previously read that fresh prop, so the card kept rendering
+ * "Approved — unblocking…" forever, simultaneously with whatever real
+ * status badge (e.g. "Done") the session moved to afterward. Exported
+ * separately so it is directly unit-testable without rendering the
+ * component (mirrors `decisionDetailText`/`buildDecisionPayload` above).
+ */
+export function shouldClearOptimisticDecision(
+  pendingDecision: PendingDecision | null,
+): boolean {
+  return pendingDecision === null;
+}
+
 interface SessionCardProps {
   session: Session;
   /**
@@ -126,6 +154,20 @@ export function SessionCard({
       cardRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   }, [highlighted]);
+
+  // Debug fix: reconcile the local optimistic "Approved/Denied" override
+  // against the real, backend-confirmed session state on every fresh
+  // `session` prop (the SSE-driven upsert in `App.tsx`). Previously nothing
+  // read `session.pendingDecision` after the initial submit, so `resolved`
+  // stayed set forever — see `shouldClearOptimisticDecision` above.
+  useEffect(() => {
+    if (shouldClearOptimisticDecision(session.pendingDecision)) {
+      setResolved(null);
+      setDenyRevealed(false);
+      setDenyReasonText("");
+      setRespondError(null);
+    }
+  }, [session.pendingDecision]);
 
   const headline = historical ? null : pendingAskHeadline(session);
   const isResolved = resolved !== null;

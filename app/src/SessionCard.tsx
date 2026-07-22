@@ -1,8 +1,32 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Decision, Session } from "../../shared/types";
+import type { Decision, PendingDecision, Session } from "../../shared/types";
 import { formatRelativeTime, pendingAskHeadline, statusLabel } from "./format";
 import { Timeline } from "./Timeline";
+
+/**
+ * Builds the plain-text "which tool/command is this about" line rendered
+ * directly under the "Needs your permission" headline (defect-B fix — the
+ * card previously gave the user nothing to decide on). Pure and
+ * side-effect-free, exported separately so it is directly unit-testable
+ * without rendering the component — see `SessionCard.test.ts`.
+ *
+ * - `null` when there is no pending decision, or it isn't a `"permission"`
+ *   kind (the card renders no decision controls in that case either).
+ * - `"<toolName>: <toolInputSummary>"` when both are present.
+ * - Falls back to whichever of the two is present when only one is.
+ * - `null` when neither `toolName` nor `toolInputSummary` is present.
+ */
+export function decisionDetailText(pendingDecision: PendingDecision | null): string | null {
+  if (!pendingDecision || pendingDecision.kind !== "permission") {
+    return null;
+  }
+  const { toolName, toolInputSummary } = pendingDecision;
+  if (toolName && toolInputSummary) {
+    return `${toolName}: ${toolInputSummary}`;
+  }
+  return toolName ?? toolInputSummary ?? null;
+}
 
 /**
  * Builds the promoted {@link Decision} value the inline controls submit
@@ -115,6 +139,8 @@ export function SessionCard({
     : headline;
   const showDecisionControls =
     !historical && !isResolved && session.pendingDecision?.kind === "permission";
+  const decisionDetail =
+    !historical && !isResolved ? decisionDetailText(session.pendingDecision) : null;
 
   async function handleDismiss() {
     setDismissing(true);
@@ -197,6 +223,9 @@ export function SessionCard({
           }
         >
           {displayHeadline}
+          {decisionDetail && (
+            <div className="session-card-decision-detail">{decisionDetail}</div>
+          )}
           {showDecisionControls && (
             <div className="session-card-decision-controls">
               <button

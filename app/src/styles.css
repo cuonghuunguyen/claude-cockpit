@@ -173,6 +173,18 @@
   color: #2fa860;
 }
 
+/* Defect-B fix: shows WHICH tool/command the pending permission decision is
+   about, directly under the pending-ask headline and above the Approve/Deny
+   controls — plain text content only (rendered via JSX interpolation in
+   SessionCard.tsx, never raw HTML, T-01-05f). */
+.session-card-decision-detail {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem;
+  font-weight: 400;
+  color: #5a4a1e;
+  word-break: break-word;
+}
+
 /* D-08: inline Approve/Deny controls sit directly under the pending-ask
    headline text, not gated behind expand. */
 .session-card-decision-controls {
@@ -425,6 +437,10 @@
 
   .session-card-summary {
     color: #e6e8ee;
+  }
+
+  .session-card-decision-detail {
+    color: #d8c68a;
   }
 
   .status-badge {

@@ -14,6 +14,7 @@ function makeSession(overrides: Partial<Session> & Pick<Session, "sessionId">): 
     endedAt: null,
     dismissedAt: null,
     source: "wsl",
+    pendingDecision: null,
     ...overrides,
   };
 }

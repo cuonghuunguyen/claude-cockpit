@@ -20,6 +20,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_store::StoreExt;
 
+use crate::toast_window::SPAWN_TOAST_EVENT_NAME;
+
 /// Fixed daemon base URL — mirrors `shared/types.ts`'s `COCKPIT_DAEMON_BASE_URL`.
 /// Both native-Windows and WSL-origin traffic reach the daemon at this
 /// literal address (SKELETON.md "Daemon bind address").
@@ -88,6 +90,29 @@ impl Default for NotificationState {
     }
 }
 
+/// Tauri-managed state tracking, per `session_id`, the last status a
+/// toast-spawn decision was made for (NOT-02). Structurally identical
+/// shape to [`NotificationState`], but tracked in its OWN map — the
+/// toast's "one spawn per new block" gate and the notification's "one fire
+/// per transition into any of three statuses" gate are different rules
+/// over the same event stream; sharing one map would make each gate
+/// silently consume the other's transition detection (calling
+/// `should_notify`/`should_spawn_toast` mutates the map as a side effect of
+/// checking it).
+pub struct ToastState(Mutex<HashMap<String, String>>);
+
+impl ToastState {
+    pub fn new() -> Self {
+        ToastState(Mutex::new(HashMap::new()))
+    }
+}
+
+impl Default for ToastState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// D-08 fire-once transition detection. Records `new_status` as the
 /// latest-seen status for `session_id` (so repeated frames of the same
 /// status, or a later diff, always compare against the true last-seen
@@ -106,6 +131,19 @@ fn should_notify(state: &NotificationState, session_id: &str, new_status: &str) 
     let mut map = state.0.lock().unwrap();
     let prev = map.insert(session_id.to_string(), new_status.to_string());
     NOTIFIABLE_STATUSES.contains(&new_status) && prev.as_deref() != Some(new_status)
+}
+
+/// NOT-02 fire-once transition-into-`waiting-permission` detection for the
+/// actionable decision toast (mirrors [`should_notify`]'s shape exactly,
+/// tracked in [`ToastState`] rather than [`NotificationState`] — see that
+/// struct's doc comment for why). Only `waiting-permission` is a toast
+/// trigger (unlike the three [`NOTIFIABLE_STATUSES`]) — a "done" or
+/// "waiting-input" transition never spawns a decision toast, there is
+/// nothing to decide on.
+fn should_spawn_toast(state: &ToastState, session_id: &str, new_status: &str) -> bool {
+    let mut map = state.0.lock().unwrap();
+    let prev = map.insert(session_id.to_string(), new_status.to_string());
+    new_status == "waiting-permission" && prev.as_deref() != Some(new_status)
 }
 
 /// Maps a notifiable status to the D-09 toast title ("the ask" — leads with
@@ -214,6 +252,52 @@ fn maybe_fire_notification(app: &AppHandle, value: &Value) {
 
     if let Err(err) = result {
         eprintln!("cockpit: failed to fire notification for session {session_id}: {err}");
+    }
+}
+
+/// Requests an actionable decision toast spawn (NOT-02, D-05) when `value`
+/// represents a genuine transition into `waiting-permission` carrying a
+/// non-null `pendingDecision` — "one toast per new block, not per SSE
+/// frame" (03-04-PLAN.md Task 2 `<behavior>`), via [`should_spawn_toast`].
+///
+/// Deliberately emits [`SPAWN_TOAST_EVENT_NAME`] rather than building the
+/// window inline — this function still runs inside
+/// `consume_events_once`'s async SSE-consumer task, and calling
+/// `WebviewWindowBuilder::build()` synchronously from that call frame is
+/// exactly the pattern that deadlocks on Windows (RESEARCH.md Pattern 5,
+/// `toast_window` module doc comment). `toast_window::register_spawn_listener`
+/// (registered once in `lib.rs`'s `setup()`) is the only thing that ever
+/// reaches the actual builder, via its own freshly spawned async task.
+///
+/// Auto-dismiss when the pendingDecision later clears (resolved/dismissed/
+/// timed-out) is deliberately NOT handled here: the toast's own webview
+/// (`app/src/ToastWindow.tsx`) independently subscribes to this same
+/// `SESSION_EVENT_NAME` stream (every window receives Tauri's global
+/// `emit`) and closes itself once its tracked session's `pendingDecision`
+/// goes `null` — no Rust-side close-triggering logic is needed.
+fn maybe_spawn_toast(app: &AppHandle, value: &Value) {
+    let (Some(session_id), Some(status)) = (
+        value.get("sessionId").and_then(Value::as_str),
+        value.get("status").and_then(Value::as_str),
+    ) else {
+        return;
+    };
+
+    let toast_state = app.state::<ToastState>();
+    if !should_spawn_toast(toast_state.inner(), session_id, status) {
+        return;
+    }
+
+    let has_pending_decision = value
+        .get("pendingDecision")
+        .map(|v| !v.is_null())
+        .unwrap_or(false);
+    if !has_pending_decision {
+        return;
+    }
+
+    if let Err(err) = app.emit(SPAWN_TOAST_EVENT_NAME, value.clone()) {
+        eprintln!("cockpit: failed to emit {SPAWN_TOAST_EVENT_NAME}: {err}");
     }
 }
 
@@ -450,6 +534,7 @@ fn emit_sse_frame(app: &AppHandle, frame: &str) {
                 // order, so detection lives here rather than in the
                 // frontend's `App.tsx` upsert/merge path.
                 maybe_fire_notification(app, &value);
+                maybe_spawn_toast(app, &value);
                 if let Err(err) = app.emit(SESSION_EVENT_NAME, value) {
                     eprintln!("cockpit: failed to emit {SESSION_EVENT_NAME}: {err}");
                 }

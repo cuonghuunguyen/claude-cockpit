@@ -1,7 +1,7 @@
 mod daemon_client;
 mod toast_window;
 
-use daemon_client::{NotificationState, ReachabilityState, TokenState};
+use daemon_client::{NotificationState, ReachabilityState, TokenState, ToastState};
 use tauri::Manager;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -37,6 +37,14 @@ pub fn run() {
             // `daemon_client.rs::maybe_fire_notification` — managed
             // eagerly for the same reason as `ReachabilityState` above.
             app.manage(NotificationState::new());
+
+            // NOT-02 fire-once transition tracking for the actionable
+            // decision toast gate (`daemon_client.rs::maybe_spawn_toast`) —
+            // its own independent map, see `ToastState`'s doc comment.
+            // (Deviation: Task 2 of 03-04-PLAN.md does not list lib.rs, but
+            // ToastState must be `app.manage()`d or `app.state::<ToastState>()`
+            // panics at runtime — Rule 3 blocking-issue auto-fix.)
+            app.manage(ToastState::new());
 
             // Off-main-thread toast spawn trigger (RESEARCH.md Pattern 5):
             // the SSE consumer only ever emits `SPAWN_TOAST_EVENT_NAME`;

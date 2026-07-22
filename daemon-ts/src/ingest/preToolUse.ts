@@ -44,14 +44,51 @@ import { registerPendingDecision } from "../decisions.js";
  */
 const NO_DECISION_NEEDED_TOOLS = new Set(["Read", "Glob", "Grep", "TodoWrite", "WebSearch", "BashOutput"]);
 
-export function needsDecision(toolName: string | null, _body: Record<string, unknown>): boolean {
+export function needsDecision(toolName: string | null, body: Record<string, unknown>): boolean {
   if (!toolName) {
     return false;
   }
   if (toolName === "AskUserQuestion") {
     return false; // 03-03 owns AskUserQuestion's answer-injection contract.
   }
-  return !NO_DECISION_NEEDED_TOOLS.has(toolName);
+  if (NO_DECISION_NEEDED_TOOLS.has(toolName)) {
+    return false;
+  }
+  return holdsForPermissionMode(body.permission_mode);
+}
+
+/**
+ * Gates the hold on the session's current permission mode (D-fix, live
+ * Phase 3 test): Claude Code only shows an interactive permission prompt in
+ * `default` mode (docs.claude.code `/permission-modes`: "default... prompts
+ * for user permission on first use of each tool"; `/hooks` "Common input
+ * fields" confirms every hook event — including `PreToolUse` — carries a
+ * `permission_mode` field alongside `session_id`/`cwd`). In `acceptEdits`,
+ * `bypassPermissions`, `plan`, `auto`, and `dontAsk` modes the tool call
+ * would never have prompted, so holding here would incorrectly stall a
+ * session running with e.g. `--dangerously-skip-permissions`
+ * (`bypassPermissions`) — every single tool call would otherwise show a
+ * false "waiting for permission" card. `plan` mode additionally gets its own
+ * 3-way `PermissionRequest`/`ExitPlanMode` contract in plan 03-05 — this
+ * gate simply excludes it from 03-01's binary approve/deny hold, it does
+ * not implement 03-05's behavior.
+ *
+ * A missing/non-string `permission_mode` (e.g. a Claude Code build that
+ * predates the field) fails safe to the pre-existing hold behavior by
+ * treating it the same as `"default"` — this is a deliberate fail-safe, not
+ * a guess: we hold (as before this fix) rather than silently stop gating
+ * permission prompts we can't classify.
+ *
+ * KNOWN LIMITATION (left as-is, not addressed by this fix): even in
+ * `default` mode, a tool/command the user has already allow-listed (via
+ * `allowedTools`, a project rule, or a prior "always allow" choice) would
+ * still be held here, because this gate only inspects `permission_mode` —
+ * it has no visibility into Claude Code's own allow-list evaluation, which
+ * happens downstream of this hook. That case would show a hold the native
+ * flow would have skipped; out of scope for this bug-fix pass.
+ */
+function holdsForPermissionMode(permissionMode: unknown): boolean {
+  return permissionMode === undefined || permissionMode === null || permissionMode === "default";
 }
 
 export function makePreToolUseHandler(db: DatabaseType) {
@@ -66,6 +103,10 @@ export function makePreToolUseHandler(db: DatabaseType) {
     const toolName = typeof body.tool_name === "string" ? body.tool_name : null;
     const condensedInput = "tool_input" in body ? condensedJsonSummary(body.tool_input, 200) : "";
     const summary = toolName ? `${toolName}: ${condensedInput}` : condensedInput;
+    // Same condensed summary, reused for the held card's pending-decision
+    // payload (defect-B fix) — `null` rather than `""` when there was no
+    // `tool_input` to summarize, matching `PendingDecision.toolInputSummary`.
+    const toolInputSummary = condensedInput.length > 0 ? condensedInput : null;
 
     const request: IngestEventRequest = {
       sessionId,
@@ -87,7 +128,7 @@ export function makePreToolUseHandler(db: DatabaseType) {
       // request/handler timeout to this response (03-RESEARCH.md Pitfall 2).
       reply.hijack();
 
-      beginPermissionHold(db, sessionId, toolName);
+      beginPermissionHold(db, sessionId, toolName, toolInputSummary);
       publishSessionUpdate(getSessionApi(db, sessionId));
 
       const decisionJson = await registerPendingDecision(sessionId, "permission", () => ({}));

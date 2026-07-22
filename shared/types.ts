@@ -89,6 +89,14 @@ export interface PendingOption {
 export interface PendingDecision {
   kind: DecisionKind;
   toolName: string | null;
+  /**
+   * Concise, opaque, length-bounded summary of the tool's input (e.g. the
+   * Bash command string) — built via `condensedJsonSummary` (same discipline
+   * used elsewhere in the ingest path). Never interpreted, only displayed
+   * verbatim via plain text interpolation (T-01-05f). `null` when the
+   * originating `PreToolUse` payload had no `tool_input` to summarize.
+   */
+  toolInputSummary: string | null;
   prompt: string;
   options: PendingOption[];
 }

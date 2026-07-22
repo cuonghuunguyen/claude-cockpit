@@ -289,4 +289,111 @@ describe("hold-open decision loop (held POST /hooks/pre-tool-use, resolved by PO
     expect(res.status).toBe(200);
     expect(hasPendingDecision("no-hold-readonly")).toBe(false);
   });
+
+  // Defect A (live Phase 3 test): sessions running in an auto/bypass
+  // permission mode never show a native permission prompt, so Cockpit must
+  // not hold PreToolUse for them either — see `needsDecision`/
+  // `holdsForPermissionMode` in `daemon-ts/src/ingest/preToolUse.ts`.
+  it("a Bash call in default permission mode DOES hold (explicit permission_mode)", async () => {
+    await startSession("mode-default");
+
+    const held = sendNow(
+      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
+        session_id: "mode-default",
+        tool_name: "Bash",
+        tool_input: { command: "echo default" },
+        permission_mode: "default",
+      }),
+    );
+    await tick();
+
+    expect(hasPendingDecision("mode-default")).toBe(true);
+
+    await auth(supertest(app.server).post("/sessions/mode-default/decision")).send({ type: "approve" });
+    const res = await held;
+    expect(res.status).toBe(200);
+    expect(
+      (res.body as { hookSpecificOutput: { permissionDecision: string } }).hookSpecificOutput.permissionDecision,
+    ).toBe("allow");
+  });
+
+  it("a Bash call in bypassPermissions mode does NOT hold — fast ack, no pending decision registered", async () => {
+    await startSession("mode-bypass");
+
+    const res = await auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
+      session_id: "mode-bypass",
+      tool_name: "Bash",
+      tool_input: { command: "echo bypass" },
+      permission_mode: "bypassPermissions",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({});
+    expect(hasPendingDecision("mode-bypass")).toBe(false);
+  });
+
+  it("a Bash call in acceptEdits mode does NOT hold — fast ack, no pending decision registered", async () => {
+    await startSession("mode-accept-edits");
+
+    const res = await auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
+      session_id: "mode-accept-edits",
+      tool_name: "Bash",
+      tool_input: { command: "echo accept-edits" },
+      permission_mode: "acceptEdits",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({});
+    expect(hasPendingDecision("mode-accept-edits")).toBe(false);
+  });
+
+  it("a Bash call with no permission_mode field at all still holds (fail-safe treats missing as default)", async () => {
+    await startSession("mode-missing");
+
+    const held = sendNow(
+      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
+        session_id: "mode-missing",
+        tool_name: "Bash",
+        tool_input: { command: "echo missing-mode" },
+      }),
+    );
+    await tick();
+
+    expect(hasPendingDecision("mode-missing")).toBe(true);
+
+    await auth(supertest(app.server).post("/sessions/mode-missing/decision")).send({ type: "approve" });
+    await held;
+  });
+
+  // Defect B: the held card must carry enough info to actually decide on —
+  // tool name AND a concise summary of the tool input, not just "something
+  // is pending" — see `PendingDecision.toolInputSummary` (shared/types.ts).
+  it("a held permission decision's SessionApi carries toolName and toolInputSummary for the card to render", async () => {
+    await startSession("hold-detail");
+
+    const held = sendNow(
+      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
+        session_id: "hold-detail",
+        tool_name: "Bash",
+        tool_input: { command: "rm -rf /tmp/x" },
+      }),
+    );
+    await tick();
+
+    const sessionRes = await auth(supertest(app.server).get("/sessions?active=true"));
+    const session = (sessionRes.body as Array<{ sessionId: string; pendingDecision: unknown }>).find(
+      (s) => s.sessionId === "hold-detail",
+    );
+    expect(session).toBeDefined();
+    expect(
+      (session as { pendingDecision: { toolName: string; toolInputSummary: string } }).pendingDecision.toolName,
+    ).toBe("Bash");
+    expect(
+      (session as { pendingDecision: { toolName: string; toolInputSummary: string } }).pendingDecision
+        .toolInputSummary,
+    ).toContain("rm -rf /tmp/x");
+
+    await auth(supertest(app.server).post("/sessions/hold-detail/decision")).send({ type: "approve" });
+    await held;
+  });
 });

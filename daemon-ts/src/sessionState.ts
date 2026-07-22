@@ -142,7 +142,19 @@ export function timelineKind(event: HookEvent): string | null {
  * comment above for why this is a separate call-site rather than a
  * `transition()` match arm. Callers must `publishSessionUpdate()`
  * immediately after this so the card reflects the hold without delay.
+ *
+ * `toolInputSummary` (defect-B fix) is the same `condensedJsonSummary`
+ * string `ingest/preToolUse.ts` already builds for the timeline entry —
+ * persisted alongside `toolName` so the card can show WHICH command/input
+ * is awaiting a decision, not just that one is pending. `null` when there
+ * was nothing to summarize (also the default for any other call site that
+ * doesn't pass it).
  */
-export function beginPermissionHold(db: DatabaseType, sessionId: string, toolName: string | null): void {
-  setStatusForHold(db, sessionId, "waiting-permission", toolName);
+export function beginPermissionHold(
+  db: DatabaseType,
+  sessionId: string,
+  toolName: string | null,
+  toolInputSummary: string | null = null,
+): void {
+  setStatusForHold(db, sessionId, "waiting-permission", toolName, toolInputSummary);
 }

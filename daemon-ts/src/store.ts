@@ -37,6 +37,7 @@ export function openDb(path: string): DatabaseType {
         status TEXT NOT NULL,
         task_summary TEXT,
         current_tool TEXT,
+        current_tool_input_summary TEXT,
         source TEXT,
         started_at INTEGER,
         last_activity_at INTEGER,
@@ -55,7 +56,30 @@ export function openDb(path: string): DatabaseType {
     );
     CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id, id);
   `);
+  migrateAddColumnIfMissing(db, "sessions", "current_tool_input_summary", "TEXT");
   return db;
+}
+
+/**
+ * `CREATE TABLE IF NOT EXISTS` (above) only helps a brand-new DB file — it
+ * is a no-op against an already-existing `sessions` table from before this
+ * column existed (defect-B fix). Adds the column via `ALTER TABLE` exactly
+ * once, checked defensively via `PRAGMA table_info` (rather than assuming
+ * SQLite's version supports `ADD COLUMN IF NOT EXISTS`, which is a newer
+ * addition than the SQLite versions `better-sqlite3` may bundle). Idempotent
+ * and safe to call on every `openDb`.
+ */
+function migrateAddColumnIfMissing(
+  db: DatabaseType,
+  table: string,
+  column: string,
+  sqlType: string,
+): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  const hasColumn = columns.some((c) => c.name === column);
+  if (!hasColumn) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${sqlType}`);
+  }
 }
 
 /** Current time as Unix epoch milliseconds. */
@@ -76,6 +100,8 @@ export interface SessionRow {
   status: string;
   taskSummary: string | null;
   currentTool: string | null;
+  /** Concise summary of the in-flight tool's input, set only while a `PreToolUse` hold is open (defect-B fix). See {@link PendingDecision.toolInputSummary}. */
+  currentToolInputSummary: string | null;
   source: string | null;
   startedAt: number | null;
   lastActivityAt: number | null;
@@ -122,6 +148,7 @@ function derivePendingDecision(row: SessionRow): PendingDecision | null {
   return {
     kind: "permission",
     toolName: row.currentTool,
+    toolInputSummary: row.currentToolInputSummary,
     prompt: row.currentTool ? `Approve ${row.currentTool}?` : "Approve this tool call?",
     options: [
       { label: "Approve", decision: { type: "approve" } },
@@ -158,7 +185,7 @@ function toSessionApi(row: SessionRow): SessionApi {
   };
 }
 
-const SESSION_COLUMNS = `session_id, cwd, workspace, branch, status, task_summary, current_tool, source,
+const SESSION_COLUMNS = `session_id, cwd, workspace, branch, status, task_summary, current_tool, current_tool_input_summary, source,
                 started_at, last_activity_at, ended_at, dismissed_at`;
 
 interface SessionSqlRow {
@@ -169,6 +196,7 @@ interface SessionSqlRow {
   status: string;
   task_summary: string | null;
   current_tool: string | null;
+  current_tool_input_summary: string | null;
   source: string | null;
   started_at: number | null;
   last_activity_at: number | null;
@@ -185,6 +213,7 @@ function sqlRowToSessionRow(row: SessionSqlRow): SessionRow {
     status: row.status,
     taskSummary: row.task_summary,
     currentTool: row.current_tool,
+    currentToolInputSummary: row.current_tool_input_summary,
     source: row.source,
     startedAt: row.started_at,
     lastActivityAt: row.last_activity_at,
@@ -421,8 +450,12 @@ export function updateSessionStatus(
   status: string,
   currentTool: string | null,
 ): void {
+  // Always clears current_tool_input_summary: this ordinary event-driven
+  // path never has a meaningful tool-input summary to show (only
+  // `setStatusForHold` below, the hold-begin call site, does), and a stale
+  // summary from a previous hold must never leak into a later render.
   db.prepare(
-    `UPDATE sessions SET status = ?, current_tool = ?, last_activity_at = ? WHERE session_id = ?`,
+    `UPDATE sessions SET status = ?, current_tool = ?, current_tool_input_summary = NULL, last_activity_at = ? WHERE session_id = ?`,
   ).run(status, currentTool, nowMillis(), sessionId);
 }
 
@@ -442,10 +475,11 @@ export function setStatusForHold(
   sessionId: string,
   status: string,
   toolName: string | null,
+  toolInputSummary: string | null = null,
 ): void {
   db.prepare(
-    `UPDATE sessions SET status = ?, current_tool = ?, last_activity_at = ? WHERE session_id = ?`,
-  ).run(status, toolName, nowMillis(), sessionId);
+    `UPDATE sessions SET status = ?, current_tool = ?, current_tool_input_summary = ?, last_activity_at = ? WHERE session_id = ?`,
+  ).run(status, toolName, toolInputSummary, nowMillis(), sessionId);
 }
 
 /**

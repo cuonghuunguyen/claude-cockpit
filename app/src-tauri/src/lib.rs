@@ -19,7 +19,8 @@ pub fn run() {
             greet,
             daemon_client::get_sessions,
             daemon_client::dismiss_session,
-            daemon_client::get_session_events
+            daemon_client::get_session_events,
+            daemon_client::submit_decision
         ])
         .setup(|app| {
             // Reachability state drives the tray watching/not-watching

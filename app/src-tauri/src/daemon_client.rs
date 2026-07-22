@@ -506,6 +506,39 @@ pub async fn dismiss_session(
     Ok(())
 }
 
+/// Tauri command: POSTs a `Decision` JSON body to the token-authed
+/// `/sessions/:id/decision` (03-01) so the frontend's inline Approve/Deny
+/// controls (Plan 03-02) can resolve a held `PreToolUse` hold. Mirrors
+/// [`dismiss_session`]'s shape exactly, but forwards `decision` as the POST
+/// body instead of sending none. `decision` is kept opaque as
+/// `serde_json::Value` — the daemon validates and maps it into the built
+/// `hookSpecificOutput`; this command does not re-type the `Decision` union
+/// in Rust (03-02-PLAN.md Task 1).
+#[tauri::command]
+pub async fn submit_decision(
+    token: tauri::State<'_, TokenState>,
+    session_id: String,
+    decision: Value,
+) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{DAEMON_BASE_URL}/sessions/{session_id}/decision"))
+        .bearer_auth(&token.0)
+        .json(&decision)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !resp.status().is_success() {
+        return Err(format!(
+            "daemon POST /sessions/{session_id}/decision returned {}",
+            resp.status()
+        ));
+    }
+
+    Ok(())
+}
+
 /// Tauri command: GETs the token-authed `/sessions/:id/events` (Plan 01-05
 /// D-09) so the frontend's expanded-card timeline can fetch a single
 /// session's condensed event history. Added in this plan — no route existed

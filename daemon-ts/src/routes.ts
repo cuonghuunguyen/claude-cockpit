@@ -174,7 +174,7 @@ export function registerRoutes(app: FastifyInstance, db: DatabaseType, token: st
 
       let outputJson: unknown;
       try {
-        outputJson = buildHookDecisionOutput(kind, req.body);
+        outputJson = buildHookDecisionOutput(kind, req.body, sessionId);
       } catch (err) {
         reply.code(400).send({ error: (err as Error).message });
         return;

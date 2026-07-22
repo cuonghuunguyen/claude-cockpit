@@ -19,6 +19,7 @@ import { basename, join } from "node:path";
 import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
 import type { PendingDecision } from "../../shared/types.js";
+import { getPendingDecisionKind, getPendingDecisionQuestions } from "./decisions.js";
 
 /**
  * Opens (or creates) the SQLite database at `path`, enables WAL mode, and
@@ -133,17 +134,53 @@ export interface SessionApi {
 
 /**
  * Derives the wire-facing {@link PendingDecision} for a `waiting-permission`
- * session (this plan's only `kind`; `ask-user-question`/`plan-mode` are
- * 03-03/03-05). `null` for every other status — the card/toast render
- * nothing when there is no held decision. Options mirror `decisions.ts`'s
- * `buildHookDecisionOutput("permission", ...)` contract: Approve carries a
- * plain `{type:"approve"}` Decision; Deny carries `{type:"deny"}` with
- * `revealReasonOnSelect` so the UI expands a reason box before submitting
- * (D-09) rather than submitting an empty-reason deny immediately.
+ * session. `null` for every other status — the card/toast render nothing
+ * when there is no held decision. Branches on the live in-memory registry's
+ * `DecisionKind` (`decisions.ts::getPendingDecisionKind`, keyed by
+ * `row.sessionId` — `pendingDecision` is derived, never persisted
+ * separately, so this is the one place that reads the registry back out):
+ *
+ * - `"permission"` (03-01, also the fallback for an ORPHANED hold — see
+ *   below): Approve carries a plain `{type:"approve"}` Decision; Deny
+ *   carries `{type:"deny"}` with `revealReasonOnSelect` so the UI expands a
+ *   reason box before submitting (D-09) rather than submitting an
+ *   empty-reason deny immediately.
+ * - `"ask-user-question"` (03-03, ACT-02): options come from the FIRST
+ *   recorded question's `options[].label`/`description`
+ *   (`decisions.ts::getPendingDecisionQuestions`) — matching
+ *   `buildHookDecisionOutput`'s own first-question-only scope — each
+ *   carrying an `{type:"answer", answers:[label]}` Decision; `multiSelect`
+ *   is propagated so the card knows whether to accumulate-then-confirm or
+ *   submit on first click.
+ *
+ * A `getPendingDecisionKind` miss (the in-memory registry entry is gone —
+ * daemon restart, or the hold's own ~585s timeout already elapsed — while
+ * the SQL-persisted status is still `waiting-permission`) falls back to the
+ * `"permission"` shape: this ORPHANED-HOLD case is exactly what the decision
+ * route's 404 handler (`routes.ts`) reconciles back off `waiting-permission`
+ * on the next click, so preserving the pre-03-03 fallback shape here keeps
+ * that existing 03-01 reconciliation test passing unchanged.
  */
 function derivePendingDecision(row: SessionRow): PendingDecision | null {
   if (row.status !== "waiting-permission") {
     return null;
+  }
+  const kind = getPendingDecisionKind(row.sessionId) ?? "permission";
+  if (kind === "ask-user-question") {
+    const questions = getPendingDecisionQuestions(row.sessionId);
+    const firstQuestion = questions?.[0];
+    return {
+      kind: "ask-user-question",
+      toolName: row.currentTool,
+      toolInputSummary: row.currentToolInputSummary,
+      prompt: firstQuestion?.question ?? "Answer this question?",
+      options: (firstQuestion?.options ?? []).map((option) => ({
+        label: option.label,
+        description: option.description,
+        decision: { type: "answer" as const, answers: [option.label] },
+      })),
+      multiSelect: firstQuestion?.multiSelect,
+    };
   }
   return {
     kind: "permission",

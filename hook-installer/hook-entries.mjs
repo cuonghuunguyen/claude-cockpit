@@ -77,11 +77,14 @@ export const ALL_COCKPIT_EVENTS = [...Object.keys(HTTP_EVENT_ROUTES), "PreToolUs
  * fails fast against a genuinely hung/unreachable daemon (fact (c) above). */
 const HTTP_HOOK_TIMEOUT_SECONDS = 5;
 
-/** Outer backstop timeout (seconds) for the PreToolUse command hook. The
- * wrapper itself enforces a hard-coded 2s AbortSignal budget internally
- * (hook-client/pretooluse-wrapper.cjs) — this is just a generous outer
- * ceiling in case the wrapper process itself is somehow slow to start. */
-const COMMAND_HOOK_TIMEOUT_SECONDS = 10;
+/** Outer backstop timeout (seconds) for the PreToolUse command hook. Raised
+ * from the Phase 1 observe-only value (10s) to accommodate the wrapper's
+ * hold-open decision wait (`HOLD_OPEN_TIMEOUT_MS = 590_000` in
+ * `hook-client/pretooluse-wrapper.cjs`, D-02) — must exceed that budget, just
+ * under Claude Code's own default 600s hook timeout (03-RESEARCH.md Pitfall
+ * 1: at the old 10s value, Cockpit's decision channel silently reverted to
+ * the native prompt after ~10s regardless of how fast the user could click). */
+const COMMAND_HOOK_TIMEOUT_SECONDS = 590;
 
 /**
  * Builds one `{matcher, hooks:[...]}` group for a native http Cockpit

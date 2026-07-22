@@ -1,4 +1,5 @@
 mod daemon_client;
+mod toast_window;
 
 use daemon_client::{NotificationState, ReachabilityState, TokenState};
 use tauri::Manager;
@@ -20,7 +21,8 @@ pub fn run() {
             daemon_client::get_sessions,
             daemon_client::dismiss_session,
             daemon_client::get_session_events,
-            daemon_client::submit_decision
+            daemon_client::submit_decision,
+            toast_window::spawn_decision_toast
         ])
         .setup(|app| {
             // Reachability state drives the tray watching/not-watching
@@ -35,6 +37,13 @@ pub fn run() {
             // `daemon_client.rs::maybe_fire_notification` — managed
             // eagerly for the same reason as `ReachabilityState` above.
             app.manage(NotificationState::new());
+
+            // Off-main-thread toast spawn trigger (RESEARCH.md Pattern 5):
+            // the SSE consumer only ever emits `SPAWN_TOAST_EVENT_NAME`;
+            // this listener is the sole path that reaches
+            // `toast_window::spawn_decision_toast`'s actual window build,
+            // via its own freshly spawned async task.
+            toast_window::register_spawn_listener(app.handle());
 
             // WR-01 fix: `read_token()` shells out to `wsl.exe`, which can
             // block for many seconds on a cold WSL2 VM boot. Running that

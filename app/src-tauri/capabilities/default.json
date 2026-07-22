@@ -1,10 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
-  "windows": ["main"],
+  "description": "Capability for the main window and the cockpit-toast actionable decision toast window (NOT-02) — a window with no capability has zero IPC access at all, so cockpit-toast must be granted one here to invoke submit_decision/spawn_decision_toast and use core:event/core:window",
+  "windows": ["main", "cockpit-toast"],
   "permissions": [
     "core:default",
+    "core:event:default",
+    "core:window:allow-close",
+    "core:window:allow-show",
     "opener:default",
     "notification:default",
     "store:default"

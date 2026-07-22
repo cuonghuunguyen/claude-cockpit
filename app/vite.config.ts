@@ -20,6 +20,21 @@ export default defineConfig(async () => ({
   //
   // 1. prevent Vite from obscuring rust errors
   clearScreen: false,
+
+  // Multi-entry build (03-04-PLAN.md): the actionable decision toast
+  // (NOT-02) is a second webview entry (`toast.html` -> `ToastWindow.tsx`),
+  // built alongside the main dashboard entry (`index.html` -> `main.tsx`)
+  // so `WebviewUrl::App("toast.html")` (`toast_window.rs`) resolves inside
+  // `frontendDist` at runtime.
+  build: {
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, "index.html"),
+        toast: path.resolve(__dirname, "toast.html"),
+      },
+    },
+  },
+
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
     port: 1420,

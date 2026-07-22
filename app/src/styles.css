@@ -160,6 +160,74 @@
   font-size: 1.05rem;
   font-weight: 700;
   color: #7a4d00;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+/* D-10: the headline's optimistic post-click text ("Approved —
+   unblocking…" / "Denied") — a calmer weight than the pending-ask
+   headline it replaces, since the card is no longer asking for anything. */
+.session-card-headline-resolved {
+  font-weight: 600;
+  color: #2fa860;
+}
+
+/* D-08: inline Approve/Deny controls sit directly under the pending-ask
+   headline text, not gated behind expand. */
+.session-card-decision-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 400;
+  font-size: 0.85rem;
+}
+
+.session-card-decision-controls button {
+  font-size: 0.82rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: 6px;
+  border: 1px solid #d8d8d8;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.session-card-decision-controls button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.session-card-approve {
+  color: #16693c;
+  border-color: #9fd8b8 !important;
+}
+
+.session-card-deny,
+.session-card-deny-confirm,
+.session-card-deny-without-reason {
+  color: #7a1f1f;
+  border-color: #eec9c9 !important;
+}
+
+/* D-09: reason textbox + Confirm, revealed only after Deny is clicked. */
+.session-card-deny-reveal {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.session-card-deny-reason {
+  font-size: 0.82rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid #d8d8d8;
+  min-width: 10rem;
+}
+
+.session-card-decision-error {
+  color: #b3261e;
 }
 
 .session-card-meta {

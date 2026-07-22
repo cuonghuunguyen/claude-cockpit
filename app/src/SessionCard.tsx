@@ -1,8 +1,33 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Session } from "../../shared/types";
+import type { Decision, Session } from "../../shared/types";
 import { formatRelativeTime, pendingAskHeadline, statusLabel } from "./format";
 import { Timeline } from "./Timeline";
+
+/**
+ * Builds the promoted {@link Decision} value the inline controls submit
+ * (ACT-01/ACT-03). Kept as a pure, side-effect-free function (exported
+ * separately from the click handlers below) so the payload shape is
+ * directly unit-testable without rendering the component — see
+ * `SessionCard.test.ts`.
+ *
+ * - `"approve"` always yields `{ type: "approve" }`.
+ * - `"deny"` with a non-blank `reason` yields `{ type: "deny", reason }`
+ *   (trimmed).
+ * - `"deny"` with an absent/whitespace-only `reason` yields `{ type: "deny" }`
+ *   with NO `reason` key at all — never an empty-string reason (mirrors
+ *   03-01's daemon-side `buildHookDecisionOutput` omission rule).
+ */
+export function buildDecisionPayload(
+  kind: "approve" | "deny",
+  reason?: string,
+): Decision {
+  if (kind === "approve") {
+    return { type: "approve" };
+  }
+  const trimmed = reason?.trim();
+  return trimmed ? { type: "deny", reason: trimmed } : { type: "deny" };
+}
 
 interface SessionCardProps {
   session: Session;
@@ -56,6 +81,22 @@ export function SessionCard({
   const [dismissError, setDismissError] = useState<string | null>(null);
   const cardRef = useRef<HTMLDivElement>(null);
 
+  // Inline Approve/Deny controls (D-08/D-09/D-10). `responding` is the
+  // in-flight loading state shared by both Approve and Deny (mirrors
+  // `dismissing` above); `respondError` is retryable and never drops the
+  // card (D-08's own "don't drop on error" requirement) — the card only
+  // leaves the attention tier once `resolved` is set on a SUCCESSFUL
+  // `submit_decision` call. `resolved` is deliberately local/optimistic
+  // (D-10): the real reconciliation happens when the next
+  // `cockpit://session-event` SSE frame updates `session.pendingDecision`
+  // from App.tsx's upsert, at which point this component simply re-renders
+  // from the fresh prop.
+  const [responding, setResponding] = useState(false);
+  const [respondError, setRespondError] = useState<string | null>(null);
+  const [resolved, setResolved] = useState<"approved" | "denied" | null>(null);
+  const [denyRevealed, setDenyRevealed] = useState(false);
+  const [denyReasonText, setDenyReasonText] = useState("");
+
   useEffect(() => {
     if (highlighted) {
       cardRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -63,6 +104,17 @@ export function SessionCard({
   }, [highlighted]);
 
   const headline = historical ? null : pendingAskHeadline(session);
+  const isResolved = resolved !== null;
+  // D-10: drop out of the attention tier immediately on a successful
+  // decision, without waiting for the reconciling SSE frame.
+  const showAttention = Boolean(headline) && !isResolved;
+  const displayHeadline = isResolved
+    ? resolved === "approved"
+      ? "Approved — unblocking…"
+      : "Denied"
+    : headline;
+  const showDecisionControls =
+    !historical && !isResolved && session.pendingDecision?.kind === "permission";
 
   async function handleDismiss() {
     setDismissing(true);
@@ -84,19 +136,124 @@ export function SessionCard({
     }
   }
 
+  /**
+   * Shared submit path for both Approve and Deny (ACT-01/ACT-03): builds
+   * the `Decision` payload via `buildDecisionPayload`, invokes the
+   * Rust-proxied `submit_decision` command (mirrors `dismiss_session`'s
+   * camelCase-JS-key -> snake_case-Rust-param convention), and only on
+   * success sets the D-10 optimistic `resolved` state. On error the card
+   * is left exactly as-is (never auto-dismissed) so the user can retry or
+   * wait for the next SSE frame to reconcile.
+   */
+  async function submitDecision(kind: "approve" | "deny", reason?: string) {
+    setResponding(true);
+    setRespondError(null);
+    try {
+      await invoke("submit_decision", {
+        sessionId: session.sessionId,
+        decision: buildDecisionPayload(kind, reason),
+      });
+      setResolved(kind === "approve" ? "approved" : "denied");
+      setDenyRevealed(false);
+    } catch (err) {
+      console.error(
+        `cockpit: failed to submit ${kind} decision`,
+        session.sessionId,
+        err,
+      );
+      setRespondError(
+        kind === "approve" ? "Could not approve — try again." : "Could not deny — try again.",
+      );
+    } finally {
+      setResponding(false);
+    }
+  }
+
+  function handleApprove() {
+    void submitDecision("approve");
+  }
+
+  function handleDeny(reason?: string) {
+    void submitDecision("deny", reason);
+  }
+
   return (
     <div
       ref={cardRef}
       className={
         "session-card" +
         ` session-card-status-${session.status}` +
-        (headline ? " session-card-attention" : "") +
+        (showAttention ? " session-card-attention" : "") +
         (historical ? " session-card-historical" : "") +
         (highlighted ? " session-card-highlighted" : "")
       }
       data-testid="session-card"
     >
-      {headline && <div className="session-card-headline">{headline}</div>}
+      {displayHeadline && (
+        <div
+          className={
+            "session-card-headline" +
+            (isResolved ? " session-card-headline-resolved" : "")
+          }
+        >
+          {displayHeadline}
+          {showDecisionControls && (
+            <div className="session-card-decision-controls">
+              <button
+                type="button"
+                className="session-card-approve"
+                onClick={handleApprove}
+                disabled={responding}
+              >
+                {responding ? "Approving…" : "Approve"}
+              </button>
+              {!denyRevealed && (
+                <button
+                  type="button"
+                  className="session-card-deny"
+                  onClick={() => setDenyRevealed(true)}
+                  disabled={responding}
+                >
+                  Deny
+                </button>
+              )}
+              {denyRevealed && (
+                <div className="session-card-deny-reveal">
+                  <input
+                    type="text"
+                    className="session-card-deny-reason"
+                    placeholder="Reason (optional)"
+                    value={denyReasonText}
+                    onChange={(e) => setDenyReasonText(e.target.value)}
+                    disabled={responding}
+                  />
+                  <button
+                    type="button"
+                    className="session-card-deny-confirm"
+                    onClick={() => handleDeny(denyReasonText)}
+                    disabled={responding}
+                  >
+                    Confirm
+                  </button>
+                  <button
+                    type="button"
+                    className="session-card-deny-without-reason"
+                    onClick={() => handleDeny()}
+                    disabled={responding}
+                  >
+                    Deny without reason
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+      {respondError && (
+        <div className="session-card-error session-card-decision-error">
+          {respondError}
+        </div>
+      )}
 
       <div className="session-card-meta">
         <span className={`status-badge status-badge-${session.status}`}>

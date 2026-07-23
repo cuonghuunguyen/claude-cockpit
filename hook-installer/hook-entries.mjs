@@ -69,8 +69,13 @@ export const HTTP_EVENT_ROUTES = {
   SessionEnd: "/hooks/session-end",
 };
 
-/** All Cockpit-managed event names, http events plus PreToolUse. */
-export const ALL_COCKPIT_EVENTS = [...Object.keys(HTTP_EVENT_ROUTES), "PreToolUse"];
+/** All Cockpit-managed event names, http events plus PreToolUse and
+ * PermissionRequest. */
+export const ALL_COCKPIT_EVENTS = [
+  ...Object.keys(HTTP_EVENT_ROUTES),
+  "PreToolUse",
+  "PermissionRequest",
+];
 
 /** Aggressive per-hook timeout (seconds) for the native http entries — the
  * daemon acks in well under a second; 5s is a generous ceiling that still
@@ -142,6 +147,51 @@ export function buildPreToolUseEntry({ port, token, nodePath, wrapperPath }) {
 }
 
 /**
+ * Builds the one `{matcher, hooks:[...]}` group for the wildcard
+ * PermissionRequest command wrapper (Plan 03-06, D-14/D-16/D-18). Reuses the
+ * SAME shared wrapper script as `buildPreToolUseEntry` above (dependency-free,
+ * `--route`-parameterized, hook-client/pretooluse-wrapper.cjs) — no second
+ * wrapper script, no wrapper edit — but targets the daemon's
+ * `/hooks/permission-request` route instead via an extra `--route` arg.
+ *
+ * The matcher is deliberately the wildcard `"*"`, not a narrower
+ * `ExitPlanMode`-only matcher: per D-16, PermissionRequest is now the ONE
+ * general-gating mechanism for ordinary tool-call permission decisions AND
+ * the plan-mode 3-way (ExitPlanMode dispatches internally on `tool_name` in
+ * the daemon handler, 03-05). Once D-14 lands, PreToolUse no longer actively
+ * resolves anything except the AskUserQuestion branch (D-15), so there is no
+ * competing resolution for PermissionRequest to race against — the
+ * RESEARCH.md "ExitPlanMode-only" caution (Pitfall 4 / Open Question 1) that
+ * motivated a narrower matcher is superseded (D-19).
+ *
+ * Must NEVER be marked `async: true` (T-03-12) — an async command hook
+ * cannot hold Claude Code open for a decision at all, silently discarding
+ * every hold.
+ */
+export function buildPermissionRequestEntry({ port, token, nodePath, wrapperPath }) {
+  return {
+    matcher: "*",
+    hooks: [
+      {
+        type: "command",
+        command: nodePath,
+        args: [
+          wrapperPath,
+          "--token",
+          token,
+          "--port",
+          String(port),
+          "--route",
+          "/hooks/permission-request",
+          COCKPIT_MARKER_ARG,
+        ],
+        timeout: COMMAND_HOOK_TIMEOUT_SECONDS,
+      },
+    ],
+  };
+}
+
+/**
  * Builds the full set of Cockpit-managed hook-entry groups, keyed by event
  * name, ready to be merged into an existing settings.json `"hooks"` object.
  */
@@ -151,6 +201,7 @@ export function buildCockpitHooksBlock({ port, token, nodePath, wrapperPath }) {
     block[event] = buildHttpHookEntry({ event, port, token });
   }
   block.PreToolUse = buildPreToolUseEntry({ port, token, nodePath, wrapperPath });
+  block.PermissionRequest = buildPermissionRequestEntry({ port, token, nodePath, wrapperPath });
   return block;
 }
 

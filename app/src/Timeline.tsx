@@ -1,10 +1,18 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  AlertTriangle,
+  Bell,
+  CheckCircle2,
+  MessageSquare,
+  ShieldAlert,
+  TerminalSquare,
+  type LucideIcon,
+} from "lucide-react";
 import type { TimelineEvent } from "../../shared/types";
 import { formatRelativeTime, groupTimelineEvents, type GroupedTimelineEntry } from "./format";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
 
 interface TimelineProps {
   sessionId: string;
@@ -18,21 +26,52 @@ interface TimelineProps {
 }
 
 /**
- * Left-border color per grouped entry kind, matching the shadcn
- * conversational-transcript reference: blue for the user's own prompts,
- * amber for anything asking for attention (notifications/permission
- * requests), green for a finished turn, red for errors. Routine
- * `tool_use`/`tool_result` runs get a neutral border — they are not a
- * response moment, just a collapsed activity log line (D-09).
+ * Icon + tint per grouped entry kind, matching the shadcn conversational
+ * activity-feed reference: blue for the user's own prompts, amber for
+ * anything asking for attention (notifications/permission requests), green
+ * for a finished turn, red for errors. Routine `tool_use`/`tool_result` runs
+ * get a neutral tint — they are not a response moment, just a collapsed
+ * activity log line (D-09).
  */
-const KIND_BORDER_CLASS: Record<GroupedTimelineEntry["kind"], string> = {
-  user_prompt: "border-l-blue-500",
-  notification: "border-l-amber-500",
-  permission_request: "border-l-amber-500",
-  completion: "border-l-green-600",
-  tool_use: "border-l-border",
-  tool_result: "border-l-border",
-  error: "border-l-red-600",
+const KIND_STYLE: Record<
+  GroupedTimelineEntry["kind"],
+  { icon: LucideIcon; iconClass: string; rowClass: string }
+> = {
+  user_prompt: {
+    icon: MessageSquare,
+    iconClass: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
+    rowClass: "bg-blue-500/5",
+  },
+  notification: {
+    icon: Bell,
+    iconClass: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
+    rowClass: "bg-amber-500/5",
+  },
+  permission_request: {
+    icon: ShieldAlert,
+    iconClass: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
+    rowClass: "bg-amber-500/5",
+  },
+  completion: {
+    icon: CheckCircle2,
+    iconClass: "bg-green-500/15 text-green-600 dark:text-green-400",
+    rowClass: "bg-green-500/5",
+  },
+  tool_use: {
+    icon: TerminalSquare,
+    iconClass: "bg-muted text-muted-foreground",
+    rowClass: "bg-muted/40",
+  },
+  tool_result: {
+    icon: TerminalSquare,
+    iconClass: "bg-muted text-muted-foreground",
+    rowClass: "bg-muted/40",
+  },
+  error: {
+    icon: AlertTriangle,
+    iconClass: "bg-destructive/15 text-destructive",
+    rowClass: "bg-destructive/10",
+  },
 };
 
 /**
@@ -81,32 +120,48 @@ export function Timeline({ sessionId, refreshKey }: TimelineProps) {
   const grouped = groupTimelineEvents(events);
 
   return (
-    <ScrollArea className="mt-1.5 max-h-72 border-t border-dashed pt-1.5" data-testid="timeline">
-      <div className="flex flex-col gap-0.5 pr-3">
-        {grouped.map((entry, index) => (
-          <div key={entry.key}>
-            {index > 0 && <Separator className="my-0.5 opacity-60" />}
+    <ScrollArea className="mt-1.5 max-h-80 border-t pt-2" data-testid="timeline">
+      <div className="flex flex-col gap-1.5 pr-3">
+        {grouped.map((entry) => {
+          const style = KIND_STYLE[entry.kind];
+          const Icon = style.icon;
+          return (
             <div
+              key={entry.key}
               className={
-                "flex items-center justify-between gap-3 border-l-2 pl-2.5 text-sm " +
-                KIND_BORDER_CLASS[entry.kind] +
-                (entry.isError ? " border-l-red-600 font-medium text-red-600 dark:text-red-400" : " text-foreground")
+                "flex items-center gap-2.5 rounded-lg p-2 " +
+                (entry.isError ? "bg-destructive/10" : style.rowClass)
               }
             >
-              <span className="flex min-w-0 items-center gap-1.5">
-                <span className="truncate">{entry.label}</span>
+              <span
+                className={
+                  "flex size-6 shrink-0 items-center justify-center rounded-full " +
+                  (entry.isError ? "bg-destructive/15 text-destructive" : style.iconClass)
+                }
+              >
+                <Icon className="size-3.5" />
+              </span>
+              <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                <span
+                  className={
+                    "truncate text-sm " +
+                    (entry.isError ? "font-medium text-destructive" : "font-medium text-foreground")
+                  }
+                >
+                  {entry.label}
+                </span>
                 {entry.count > 1 && (
                   <Badge variant="secondary" className="shrink-0">
                     {entry.count}
                   </Badge>
                 )}
               </span>
-              <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground">
+              <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground tabular-nums">
                 {formatRelativeTime(entry.createdAt)}
               </span>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </ScrollArea>
   );

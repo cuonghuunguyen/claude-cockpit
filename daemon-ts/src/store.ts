@@ -152,14 +152,24 @@ export interface SessionApi {
  *   carrying an `{type:"answer", answers:[label]}` Decision; `multiSelect`
  *   is propagated so the card knows whether to accumulate-then-confirm or
  *   submit on first click.
+ * - `"plan-mode"` (03-05, ACT-02, D-16): derived whenever `row.currentTool`
+ *   is `"ExitPlanMode"` (the only tool the wildcard `PermissionRequest`
+ *   handler registers under this kind), regardless of what the in-memory
+ *   registry says — three static options: "Yes" (`plan-allow`), "Yes, and
+ *   auto-accept edits for the rest of this session" (naming the acceptEdits
+ *   consequence explicitly, Open Question 2) (`plan-allow-accept-edits`),
+ *   and "No" (`plan-deny`, `revealReasonOnSelect` so a deny message can be
+ *   attached, mirroring the `permission` kind's deny-reason UX).
  *
  * A `getPendingDecisionKind` miss (the in-memory registry entry is gone —
  * daemon restart, or the hold's own ~585s timeout already elapsed — while
  * the SQL-persisted status is still `waiting-permission`) falls back to the
- * `"permission"` shape: this ORPHANED-HOLD case is exactly what the decision
- * route's 404 handler (`routes.ts`) reconciles back off `waiting-permission`
- * on the next click, so preserving the pre-03-03 fallback shape here keeps
- * that existing 03-01 reconciliation test passing unchanged.
+ * `"permission"` shape (unless `currentTool` is `"ExitPlanMode"`, handled by
+ * the `plan-mode` branch above): this ORPHANED-HOLD case is exactly what the
+ * decision route's 404 handler (`routes.ts`) reconciles back off
+ * `waiting-permission` on the next click, so preserving the pre-03-03
+ * fallback shape here keeps that existing 03-01 reconciliation test passing
+ * unchanged.
  */
 function derivePendingDecision(row: SessionRow): PendingDecision | null {
   if (row.status !== "waiting-permission") {
@@ -180,6 +190,22 @@ function derivePendingDecision(row: SessionRow): PendingDecision | null {
         decision: { type: "answer" as const, answers: [option.label] },
       })),
       multiSelect: firstQuestion?.multiSelect,
+    };
+  }
+  if (row.currentTool === "ExitPlanMode") {
+    return {
+      kind: "plan-mode",
+      toolName: row.currentTool,
+      toolInputSummary: row.currentToolInputSummary,
+      prompt: "Exit plan mode and start implementing?",
+      options: [
+        { label: "Yes", decision: { type: "plan-allow" } },
+        {
+          label: "Yes, and auto-accept edits for the rest of this session",
+          decision: { type: "plan-allow-accept-edits" },
+        },
+        { label: "No", decision: { type: "plan-deny" }, revealReasonOnSelect: true },
+      ],
     };
   }
   return {

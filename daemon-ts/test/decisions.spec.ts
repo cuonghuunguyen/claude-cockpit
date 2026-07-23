@@ -1,17 +1,19 @@
 /**
- * Integration spec for the hold-open decision loop (FND-04/ACT-01/ACT-03,
- * 03-RESEARCH.md Pattern 2). Exercises `registerPendingDecision`,
- * `resolvePendingDecision`, and `buildHookDecisionOutput`
- * (`daemon-ts/src/decisions.ts`) indirectly through the real, token-gated
- * HTTP surface: a decision-requiring `POST /hooks/pre-tool-use` is held
- * open by the daemon and resolved only by the new `POST
- * /sessions/:id/decision` route — mirrors `test/ingest-routes.spec.ts`'s
- * harness (real Fastify app + real on-disk temp SQLite file, bearer-token
- * auth).
+ * Unit spec for `needsDecision`'s PreToolUse pass-through gate, the
+ * pending-decision registry's register/resolve/idempotency/timeout/dismiss
+ * contract, and `buildHookDecisionOutput`'s PermissionRequest-shaped
+ * outputs (FND-04/ACT-01/ACT-02/ACT-03; reworked 03-05, D-14/D-16).
  *
- * RED (Task 1): `decisions.ts` and the decision route do not exist yet —
- * every case below must fail until Task 2 (GREEN) implements them. No
- * assertion here is weakened to make this pass prematurely.
+ * The general (Bash) held-loop integration cases previously exercised here
+ * through `POST /hooks/pre-tool-use` are RELOCATED to
+ * `test/permission-request.spec.ts` (03-05): Bash no longer holds on
+ * PreToolUse (D-14), so the general held loop now lives entirely behind the
+ * new `POST /hooks/permission-request` route. `AskUserQuestion`'s held loop
+ * remains covered by `test/ask-user-question.spec.ts` (unchanged, D-15).
+ * The one HTTP integration case kept here (the decision-route's
+ * orphan-reconciliation "never resurrect a done session" guard) is
+ * unaffected by which hook produced a hold, so it stays as direct coverage
+ * of `routes.ts`'s shared 404 handler.
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -26,13 +28,162 @@ import { buildApp } from "../src/main.js";
 import { openDb } from "../src/store.js";
 import {
   __setDefaultTimeoutMsForTests,
+  buildHookDecisionOutput,
+  getPendingDecisionKind,
   hasPendingDecision,
+  registerPendingDecision,
+  releasePendingDecisionOnDismiss,
+  resolvePendingDecision,
 } from "../src/decisions.js";
+import { needsDecision } from "../src/ingest/preToolUse.js";
 
 const TEST_TOKEN = "decisions-test-token-0123456789abcdef012345";
 const auth = (r: supertest.Test) => r.set("Authorization", `Bearer ${TEST_TOKEN}`);
 
-describe("hold-open decision loop (held POST /hooks/pre-tool-use, resolved by POST /sessions/:id/decision)", () => {
+describe("needsDecision (PreToolUse pass-through gate, D-14)", () => {
+  it("returns true only for AskUserQuestion", () => {
+    expect(needsDecision("AskUserQuestion", {})).toBe(true);
+  });
+
+  it.each(["Bash", "Write", "Agent", "Skill", "Read", "Glob"])(
+    "returns false for %s regardless of permission_mode (general case is pass-through per D-14)",
+    (toolName) => {
+      expect(needsDecision(toolName, {})).toBe(false);
+      expect(needsDecision(toolName, { permission_mode: "default" })).toBe(false);
+      expect(needsDecision(toolName, { permission_mode: "bypassPermissions" })).toBe(false);
+    },
+  );
+
+  it("returns false for a null tool name", () => {
+    expect(needsDecision(null, {})).toBe(false);
+  });
+});
+
+describe('buildHookDecisionOutput ("permission" kind, PermissionRequest-shaped per D-14)', () => {
+  it("approve -> hookEventName PermissionRequest, decision.behavior allow", () => {
+    expect(buildHookDecisionOutput("permission", { type: "approve" })).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: { behavior: "allow" },
+      },
+    });
+  });
+
+  it("deny with a reason -> decision.behavior deny + message", () => {
+    expect(buildHookDecisionOutput("permission", { type: "deny", reason: "not now" })).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: { behavior: "deny", message: "not now" },
+      },
+    });
+  });
+
+  it("deny with a blank reason omits message entirely", () => {
+    const result = buildHookDecisionOutput("permission", { type: "deny", reason: "   " }) as {
+      hookSpecificOutput: { decision: Record<string, unknown> };
+    };
+    expect(result.hookSpecificOutput.decision).toEqual({ behavior: "deny" });
+    expect(result.hookSpecificOutput.decision).not.toHaveProperty("message");
+  });
+
+  it('throws for a Decision.type not valid for kind "permission"', () => {
+    expect(() => buildHookDecisionOutput("permission", { type: "plan-allow" })).toThrow();
+  });
+});
+
+describe('buildHookDecisionOutput ("plan-mode" kind, ACT-02/D-16)', () => {
+  it("plan-allow -> decision.behavior allow", () => {
+    expect(buildHookDecisionOutput("plan-mode", { type: "plan-allow" })).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: { behavior: "allow" },
+      },
+    });
+  });
+
+  it("plan-allow-accept-edits -> decision.behavior allow + updatedPermissions setMode acceptEdits session", () => {
+    expect(buildHookDecisionOutput("plan-mode", { type: "plan-allow-accept-edits" })).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: {
+          behavior: "allow",
+          updatedPermissions: [{ type: "setMode", mode: "acceptEdits", destination: "session" }],
+        },
+      },
+    });
+  });
+
+  it("plan-deny with a message -> decision.behavior deny + message", () => {
+    expect(
+      buildHookDecisionOutput("plan-mode", { type: "plan-deny", message: "Not now — keep planning" }),
+    ).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: { behavior: "deny", message: "Not now — keep planning" },
+      },
+    });
+  });
+
+  it("plan-deny with a blank message omits message entirely", () => {
+    const result = buildHookDecisionOutput("plan-mode", { type: "plan-deny", message: "  " }) as {
+      hookSpecificOutput: { decision: Record<string, unknown> };
+    };
+    expect(result.hookSpecificOutput.decision).toEqual({ behavior: "deny" });
+    expect(result.hookSpecificOutput.decision).not.toHaveProperty("message");
+  });
+
+  it('throws for a Decision.type not valid for kind "plan-mode"', () => {
+    expect(() => buildHookDecisionOutput("plan-mode", { type: "approve" })).toThrow();
+  });
+});
+
+describe("pending-decision registry (register/resolve/idempotency/timeout/dismiss)", () => {
+  afterEach(() => {
+    __setDefaultTimeoutMsForTests(585_000); // restore the production default
+  });
+
+  it("register then resolve delivers the resolved json and clears the pending entry", async () => {
+    const promise = registerPendingDecision("reg-1", "permission", () => ({}));
+    expect(hasPendingDecision("reg-1")).toBe(true);
+    expect(getPendingDecisionKind("reg-1")).toBe("permission");
+
+    const resolved = resolvePendingDecision("reg-1", { ok: true });
+    expect(resolved).toBe(true);
+    expect(hasPendingDecision("reg-1")).toBe(false);
+    await expect(promise).resolves.toEqual({ ok: true });
+  });
+
+  it("resolvePendingDecision is idempotent -- a second resolve for the same id is a no-op returning false", async () => {
+    const promise = registerPendingDecision("reg-2", "permission", () => ({}));
+    expect(resolvePendingDecision("reg-2", { first: true })).toBe(true);
+    expect(resolvePendingDecision("reg-2", { second: true })).toBe(false);
+    await expect(promise).resolves.toEqual({ first: true });
+  });
+
+  it("resolvePendingDecision for an unknown sessionId is a safe no-op returning false", () => {
+    expect(resolvePendingDecision("never-registered", {})).toBe(false);
+  });
+
+  it("releasePendingDecisionOnDismiss resolves the hold with the empty release-to-native payload", async () => {
+    const promise = registerPendingDecision("reg-3", "permission", () => ({}));
+    const released = releasePendingDecisionOnDismiss("reg-3");
+    expect(released).toBe(true);
+    await expect(promise).resolves.toEqual({});
+  });
+
+  it("the registry's own timeout resolves via onTimeout() and clears the pending entry", async () => {
+    const promise = registerPendingDecision("reg-4", "permission", () => ({ timedOut: true }), 20);
+    expect(hasPendingDecision("reg-4")).toBe(true);
+    await expect(promise).resolves.toEqual({ timedOut: true });
+    expect(hasPendingDecision("reg-4")).toBe(false);
+  });
+
+  it("getPendingDecisionKind returns null when nothing is pending", () => {
+    expect(getPendingDecisionKind("no-such-session")).toBeNull();
+  });
+});
+
+describe("decision route reconciliation guard (routes.ts, unaffected by the PermissionRequest migration)", () => {
   let tmpDir: string;
   let db: DatabaseType;
   let app: FastifyInstance;
@@ -41,420 +192,21 @@ describe("hold-open decision loop (held POST /hooks/pre-tool-use, resolved by PO
     tmpDir = mkdtempSync(join(tmpdir(), "cockpit-decisions-test-"));
     db = openDb(join(tmpDir, "cockpit.db"));
     app = buildApp(db, TEST_TOKEN);
-    // Explicit listen (mirrors test/sse-route.spec.ts) rather than
-    // `app.ready()` — concurrent held requests each drive supertest to
-    // dispatch real sockets against `app.server`, and supertest's own
-    // lazy `listen(0)` would otherwise race across two simultaneous
-    // requests fired before the server has an address yet.
-    await app.listen({ port: 0, host: "127.0.0.1" });
+    await app.ready();
   });
 
   afterEach(async () => {
-    __setDefaultTimeoutMsForTests(585_000); // restore the production default
     await app.close();
     db.close();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  async function startSession(sessionId: string): Promise<void> {
+  it("a 404 decision POST for a session that is NOT waiting-permission never resurrects it (a done session stays done)", async () => {
     await auth(supertest(app.server).post("/hooks/session-start")).send({
-      session_id: sessionId,
+      session_id: "orphan-done",
       cwd: "/tmp/x",
       source: "startup",
     });
-  }
-
-  /**
-   * Fires a supertest `Test` request immediately via its own `.end()` —
-   * NOT `await`/`.then()`. superagent's `Request` only actually dispatches
-   * the HTTP call once `.then()`/`.end()` is invoked, so a plain
-   * `const p = auth(supertest(...).post(...)).send(...)` assigned without
-   * awaiting/then-ing would never actually reach the server, which matters
-   * here because the whole point is to start a held request and inspect
-   * server-side state (`hasPendingDecision`) WHILE it is still in flight.
-   * Returns a genuine `Promise` the test can `await` later, once the held
-   * response has been resolved server-side.
-   */
-  function sendNow(reqBuilder: supertest.Test): Promise<supertest.Response> {
-    return new Promise((resolve, reject) => {
-      reqBuilder.end((err, res) => {
-        if (err) reject(err);
-        else resolve(res);
-      });
-    });
-  }
-
-  /** Small tick so the held request has actually registered its pending
-   * decision before the test issues the resolving/inspecting call. */
-  const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
-
-  it("held PreToolUse resolves only after POST /sessions/:id/decision, with the built approve JSON", async () => {
-    await startSession("hold-approve");
-
-    const held = sendNow(
-      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-        session_id: "hold-approve",
-        tool_name: "Bash",
-        tool_input: { command: "rm -rf /tmp/x" },
-      }),
-    );
-    await tick();
-    expect(hasPendingDecision("hold-approve")).toBe(true);
-
-    const decisionRes = await auth(supertest(app.server).post("/sessions/hold-approve/decision")).send({
-      type: "approve",
-    });
-    expect(decisionRes.status).toBe(200);
-
-    const heldRes = await held;
-    expect(heldRes.status).toBe(200);
-    expect(heldRes.body).toEqual({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "allow",
-      },
-    });
-  });
-
-  it("deny with a reason returns deny JSON carrying permissionDecisionReason", async () => {
-    await startSession("hold-deny-reason");
-
-    const held = sendNow(
-      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-        session_id: "hold-deny-reason",
-        tool_name: "Bash",
-        tool_input: { command: "rm -rf /tmp/x" },
-      }),
-    );
-    await tick();
-
-    await auth(supertest(app.server).post("/sessions/hold-deny-reason/decision")).send({
-      type: "deny",
-      reason: "Not right now",
-    });
-
-    const heldRes = await held;
-    expect(heldRes.body).toEqual({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: "Not right now",
-      },
-    });
-  });
-
-  it("deny with an absent/whitespace-only reason omits permissionDecisionReason entirely", async () => {
-    await startSession("hold-deny-empty");
-
-    const held = sendNow(
-      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-        session_id: "hold-deny-empty",
-        tool_name: "Bash",
-        tool_input: { command: "rm -rf /tmp/x" },
-      }),
-    );
-    await tick();
-
-    await auth(supertest(app.server).post("/sessions/hold-deny-empty/decision")).send({
-      type: "deny",
-      reason: "   ",
-    });
-
-    const heldRes = await held;
-    expect(heldRes.body).toEqual({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-      },
-    });
-    expect(
-      (heldRes.body as { hookSpecificOutput: Record<string, unknown> }).hookSpecificOutput,
-    ).not.toHaveProperty("permissionDecisionReason");
-  });
-
-  it("two sessions held concurrently: deciding session A resolves only A, leaves B pending", async () => {
-    await startSession("hold-a");
-    await startSession("hold-b");
-
-    const heldA = sendNow(
-      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-        session_id: "hold-a",
-        tool_name: "Bash",
-        tool_input: { command: "echo a" },
-      }),
-    );
-    const heldB = sendNow(
-      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-        session_id: "hold-b",
-        tool_name: "Bash",
-        tool_input: { command: "echo b" },
-      }),
-    );
-    await tick();
-
-    expect(hasPendingDecision("hold-a")).toBe(true);
-    expect(hasPendingDecision("hold-b")).toBe(true);
-
-    await auth(supertest(app.server).post("/sessions/hold-a/decision")).send({ type: "approve" });
-
-    const resA = await heldA;
-    expect(
-      (resA.body as { hookSpecificOutput: { permissionDecision: string } }).hookSpecificOutput.permissionDecision,
-    ).toBe("allow");
-    expect(hasPendingDecision("hold-a")).toBe(false);
-    expect(hasPendingDecision("hold-b")).toBe(true);
-
-    await auth(supertest(app.server).post("/sessions/hold-b/decision")).send({ type: "deny" });
-    const resB = await heldB;
-    expect(
-      (resB.body as { hookSpecificOutput: { permissionDecision: string } }).hookSpecificOutput.permissionDecision,
-    ).toBe("deny");
-  });
-
-  it("a decision POST for a sessionId with no pending entry returns 404/409, and a second POST after resolution likewise does not re-resolve", async () => {
-    const noHold = await auth(supertest(app.server).post("/sessions/never-held/decision")).send({
-      type: "approve",
-    });
-    expect([404, 409]).toContain(noHold.status);
-
-    await startSession("hold-once");
-    const held = sendNow(
-      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-        session_id: "hold-once",
-        tool_name: "Bash",
-        tool_input: { command: "echo once" },
-      }),
-    );
-    await tick();
-
-    const first = await auth(supertest(app.server).post("/sessions/hold-once/decision")).send({
-      type: "approve",
-    });
-    expect(first.status).toBe(200);
-    await held;
-
-    const second = await auth(supertest(app.server).post("/sessions/hold-once/decision")).send({
-      type: "approve",
-    });
-    expect([404, 409]).toContain(second.status);
-  });
-
-  it("timeout path: an injected short timeoutMs resolves the held response to an empty decision", async () => {
-    __setDefaultTimeoutMsForTests(30);
-    await startSession("hold-timeout");
-
-    const held = sendNow(
-      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-        session_id: "hold-timeout",
-        tool_name: "Bash",
-        tool_input: { command: "echo timeout" },
-      }),
-    );
-
-    const heldRes = await held;
-    expect(heldRes.body).toEqual({});
-    expect(hasPendingDecision("hold-timeout")).toBe(false);
-  });
-
-  it("dismiss path: POST /sessions/:id/dismiss while held resolves to an empty decision and removes the card from the active queue", async () => {
-    await startSession("hold-dismiss");
-
-    const held = sendNow(
-      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-        session_id: "hold-dismiss",
-        tool_name: "Bash",
-        tool_input: { command: "echo dismiss" },
-      }),
-    );
-    await tick();
-    expect(hasPendingDecision("hold-dismiss")).toBe(true);
-
-    const dismissRes = await auth(supertest(app.server).post("/sessions/hold-dismiss/dismiss"));
-    expect(dismissRes.status).toBe(200);
-
-    const heldRes = await held;
-    expect(heldRes.body).toEqual({});
-    expect(hasPendingDecision("hold-dismiss")).toBe(false);
-
-    const active = await auth(supertest(app.server).get("/sessions?active=true"));
-    expect(active.body.some((s: { sessionId: string }) => s.sessionId === "hold-dismiss")).toBe(false);
-  });
-
-  it("a read-only tool that needs no decision still acks immediately without holding", async () => {
-    await startSession("no-hold-readonly");
-
-    const res = await auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-      session_id: "no-hold-readonly",
-      tool_name: "Read",
-      tool_input: { file_path: "/tmp/x/file.txt" },
-    });
-
-    expect(res.status).toBe(200);
-    expect(hasPendingDecision("no-hold-readonly")).toBe(false);
-  });
-
-  // Defect A (live Phase 3 test): sessions running in an auto/bypass
-  // permission mode never show a native permission prompt, so Cockpit must
-  // not hold PreToolUse for them either — see `needsDecision`/
-  // `holdsForPermissionMode` in `daemon-ts/src/ingest/preToolUse.ts`.
-  it("a Bash call in default permission mode DOES hold (explicit permission_mode)", async () => {
-    await startSession("mode-default");
-
-    const held = sendNow(
-      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-        session_id: "mode-default",
-        tool_name: "Bash",
-        tool_input: { command: "echo default" },
-        permission_mode: "default",
-      }),
-    );
-    await tick();
-
-    expect(hasPendingDecision("mode-default")).toBe(true);
-
-    await auth(supertest(app.server).post("/sessions/mode-default/decision")).send({ type: "approve" });
-    const res = await held;
-    expect(res.status).toBe(200);
-    expect(
-      (res.body as { hookSpecificOutput: { permissionDecision: string } }).hookSpecificOutput.permissionDecision,
-    ).toBe("allow");
-  });
-
-  it("a Bash call in bypassPermissions mode does NOT hold — fast ack, no pending decision registered", async () => {
-    await startSession("mode-bypass");
-
-    const res = await auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-      session_id: "mode-bypass",
-      tool_name: "Bash",
-      tool_input: { command: "echo bypass" },
-      permission_mode: "bypassPermissions",
-    });
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({});
-    expect(hasPendingDecision("mode-bypass")).toBe(false);
-  });
-
-  it("a Bash call in acceptEdits mode does NOT hold — fast ack, no pending decision registered", async () => {
-    await startSession("mode-accept-edits");
-
-    const res = await auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-      session_id: "mode-accept-edits",
-      tool_name: "Bash",
-      tool_input: { command: "echo accept-edits" },
-      permission_mode: "acceptEdits",
-    });
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({});
-    expect(hasPendingDecision("mode-accept-edits")).toBe(false);
-  });
-
-  it("a Bash call with no permission_mode field at all still holds (fail-safe treats missing as default)", async () => {
-    await startSession("mode-missing");
-
-    const held = sendNow(
-      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-        session_id: "mode-missing",
-        tool_name: "Bash",
-        tool_input: { command: "echo missing-mode" },
-      }),
-    );
-    await tick();
-
-    expect(hasPendingDecision("mode-missing")).toBe(true);
-
-    await auth(supertest(app.server).post("/sessions/mode-missing/decision")).send({ type: "approve" });
-    await held;
-  });
-
-  // Defect B: the held card must carry enough info to actually decide on —
-  // tool name AND a concise summary of the tool input, not just "something
-  // is pending" — see `PendingDecision.toolInputSummary` (shared/types.ts).
-  it("a held permission decision's SessionApi carries toolName and toolInputSummary for the card to render", async () => {
-    await startSession("hold-detail");
-
-    const held = sendNow(
-      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-        session_id: "hold-detail",
-        tool_name: "Bash",
-        tool_input: { command: "rm -rf /tmp/x" },
-      }),
-    );
-    await tick();
-
-    const sessionRes = await auth(supertest(app.server).get("/sessions?active=true"));
-    const session = (sessionRes.body as Array<{ sessionId: string; pendingDecision: unknown }>).find(
-      (s) => s.sessionId === "hold-detail",
-    );
-    expect(session).toBeDefined();
-    expect(
-      (session as { pendingDecision: { toolName: string; toolInputSummary: string } }).pendingDecision.toolName,
-    ).toBe("Bash");
-    expect(
-      (session as { pendingDecision: { toolName: string; toolInputSummary: string } }).pendingDecision
-        .toolInputSummary,
-    ).toContain("rm -rf /tmp/x");
-
-    await auth(supertest(app.server).post("/sessions/hold-detail/decision")).send({ type: "approve" });
-    await held;
-  });
-
-  // Defect B (orphaned-hold reconciliation): once the in-memory registry
-  // entry is gone (daemon restart via `tsx watch`, or the ~585s hold timeout
-  // elapsing) but the SQL-persisted status is still `waiting-permission`, the
-  // card keeps rendering live-looking Approve/Deny controls that can only
-  // 404 forever. A 404 on POST /sessions/:id/decision must ALSO reconcile the
-  // stored status off `waiting-permission` so the card clears itself.
-  it("orphaned hold: a 404 decision POST reconciles the stored status off waiting-permission (card stops offering dead controls)", async () => {
-    // Reproduce the orphaned-hold state the same way it occurs in production:
-    // the in-memory pending-decision entry disappears (here via the injected
-    // short timeout) while the persisted status stays `waiting-permission`.
-    __setDefaultTimeoutMsForTests(30);
-    await startSession("orphan-hold");
-
-    const held = sendNow(
-      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
-        session_id: "orphan-hold",
-        tool_name: "Bash",
-        tool_input: { command: "echo orphan" },
-      }),
-    );
-
-    // Let the hold register and then time out — the registry entry is removed
-    // (release-to-native `{}`), but nothing clears the persisted status.
-    const heldRes = await held;
-    expect(heldRes.body).toEqual({});
-    expect(hasPendingDecision("orphan-hold")).toBe(false);
-
-    // Precondition: the card still LOOKS live — status persisted as
-    // waiting-permission, so the derived pendingDecision is non-null.
-    const before = await auth(supertest(app.server).get("/sessions?active=true"));
-    const beforeSession = (
-      before.body as Array<{ sessionId: string; status: string; pendingDecision: unknown }>
-    ).find((s) => s.sessionId === "orphan-hold");
-    expect(beforeSession?.status).toBe("waiting-permission");
-    expect(beforeSession?.pendingDecision).not.toBeNull();
-
-    // The stale Approve click: no live hold -> 404, but the daemon now ALSO
-    // reconciles the stored status off waiting-permission.
-    const staleApprove = await auth(supertest(app.server).post("/sessions/orphan-hold/decision")).send({
-      type: "approve",
-    });
-    expect(staleApprove.status).toBe(404);
-
-    // The card no longer offers dead controls: status reconciled back to
-    // `running`, pendingDecision cleared.
-    const after = await auth(supertest(app.server).get("/sessions?active=true"));
-    const afterSession = (
-      after.body as Array<{ sessionId: string; status: string; pendingDecision: unknown }>
-    ).find((s) => s.sessionId === "orphan-hold");
-    expect(afterSession?.status).toBe("running");
-    expect(afterSession?.pendingDecision).toBeNull();
-  });
-
-  it("a 404 decision POST for a session that is NOT waiting-permission never resurrects it (a done session stays done)", async () => {
-    await startSession("orphan-done");
     // Drive the session to `done` via a real Stop event.
     await auth(supertest(app.server).post("/hooks/stop")).send({ session_id: "orphan-done" });
     expect(hasPendingDecision("orphan-done")).toBe(false);

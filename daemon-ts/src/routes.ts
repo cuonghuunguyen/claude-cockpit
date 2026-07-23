@@ -25,6 +25,7 @@ import * as sse from "./sse.js";
 import { makeSessionStartHandler } from "./ingest/sessionStart.js";
 import { makeUserPromptSubmitHandler } from "./ingest/userPromptSubmit.js";
 import { makePreToolUseHandler } from "./ingest/preToolUse.js";
+import { makePermissionRequestHandler } from "./ingest/permissionRequest.js";
 import { makePostToolUseHandler } from "./ingest/postToolUse.js";
 import { makeNotificationHandler } from "./ingest/notification.js";
 import { makeStopHandler } from "./ingest/stop.js";
@@ -196,6 +197,9 @@ export function registerRoutes(app: FastifyInstance, db: DatabaseType, token: st
   app.post("/hooks/session-start", { preHandler: auth }, makeSessionStartHandler(db));
   app.post("/hooks/user-prompt-submit", { preHandler: auth }, makeUserPromptSubmitHandler(db));
   app.post("/hooks/pre-tool-use", { preHandler: auth }, makePreToolUseHandler(db));
+  // NEW (D-14/D-16, 03-05): the wildcard-matched general-gating mechanism —
+  // registered next to /hooks/pre-tool-use, same auth preHandler (FND-05).
+  app.post("/hooks/permission-request", { preHandler: auth }, makePermissionRequestHandler(db));
   app.post("/hooks/post-tool-use", { preHandler: auth }, makePostToolUseHandler(db));
   app.post("/hooks/notification", { preHandler: auth }, makeNotificationHandler(db));
   app.post("/hooks/stop", { preHandler: auth }, makeStopHandler(db));

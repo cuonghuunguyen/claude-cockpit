@@ -1,24 +1,33 @@
 /**
- * `POST /hooks/pre-tool-use` handler (FND-04, ACT-01, ACT-03).
+ * `POST /hooks/pre-tool-use` handler (FND-04, ACT-01, ACT-03; reworked
+ * D-14/03-05).
  *
  * Records the upcoming tool call (`tool_use` timeline entry, sets
- * `current_tool`) exactly as before. For a decision-requiring tool
- * ({@link needsDecision}) the handler no longer acks immediately: it marks
- * the session `waiting-permission`, publishes the update so the card shows
- * the ask without delay, and HOLDS the HTTP response open
+ * `current_tool`) exactly as before. Per D-14, this handler is now
+ * PASS-THROUGH for the general case: general tool-call permission gating
+ * moved to the NEW wildcard `PermissionRequest` hook
+ * (`ingest/permissionRequest.ts`), which Claude Code fires only after its
+ * own permission evaluation has decided an interactive dialog is genuinely
+ * needed. Holding here for every tool regardless of whether Claude Code
+ * would actually prompt was the root cause of the phantom-hold defect this
+ * migration removes (03-RESEARCH.md Finding A).
+ *
+ * `AskUserQuestion` (03-03, D-15) is the ONE deliberate exception and is
+ * unchanged by this migration: it is not a permission decision at all (no
+ * dialog for `PermissionRequest` to fire on) but an answer-injection
+ * contract, so it keeps holding here exactly as before — mark the session
+ * `waiting-permission`, publish the update, and HOLD the HTTP response open
  * (`reply.hijack()` — the same pattern already proven for `GET /events`,
  * bypassing Fastify 5's opt-in `handlerTimeout`) until
  * `registerPendingDecision` resolves — either via `POST
  * /sessions/:id/decision`, a dismiss, or the registry's own timeout (D-03).
- * The held response body is always the built `hookSpecificOutput` JSON
- * (or `{}` on release-to-native), forwarded verbatim by
+ * The held response body is always the built `hookSpecificOutput` JSON (or
+ * `{}` on release-to-native), forwarded verbatim by
  * `hook-client/pretooluse-wrapper.cjs` to Claude Code.
  *
- * Ordinary (non-decision) tool calls keep today's fast, non-blocking ack —
- * this handler is no longer observe-only in general, but it emits no
- * decision output for anything `needsDecision` excludes. Mirrors
- * `daemon/src/ingest/pre_tool_use.rs`'s original shape, extended per
- * 03-RESEARCH.md Pattern 2.
+ * Every other tool call gets a fast, non-blocking ack with NO decision
+ * output of any kind — Claude Code's own native permission evaluation
+ * decides, uninterrupted by this handler.
  */
 
 import type { FastifyReply, FastifyRequest } from "fastify";
@@ -32,69 +41,19 @@ import { parseAskUserQuestionQuestions, registerPendingDecision } from "../decis
 import type { DecisionKind } from "../../../shared/types.js";
 
 /**
- * Conservative denylist (03-01 scope) of tools that never need an
- * interactive decision through this hold-open channel: read-only/inert
- * tools that never mutate state and are never gated by an interactive
- * permission prompt in practice. `AskUserQuestion` is handled separately
- * (see {@link needsDecision} below) — it always needs an answer regardless
- * of `permission_mode`, so it is never checked against this set or the
- * `permission_mode` gate. Everything else arriving at `PreToolUse` is
- * scoped conservatively as decision-requiring; this is the walking
- * skeleton of the whole phase's decision channel, not a claim that every
- * one of these tools would actually show a native permission prompt.
+ * Reduced per D-14/03-05: PreToolUse no longer resolves the general
+ * tool-call permission decision (that moved to the wildcard
+ * `PermissionRequest` hook — `ingest/permissionRequest.ts`). `true` iff the
+ * incoming call is `AskUserQuestion` (03-03, D-15's preserved exception —
+ * an answer-injection contract, not a permission decision); `false` for
+ * every other tool, which now falls through to the fast, non-blocking ack.
+ * The prior denylist/`permission_mode` heuristic (`NO_DECISION_NEEDED_TOOLS`
+ * / `holdsForPermissionMode`) is removed — it was the phantom-hold defect's
+ * root cause (holding on this hook for tools Claude Code's own permission
+ * evaluation would never actually have prompted for).
  */
-const NO_DECISION_NEEDED_TOOLS = new Set(["Read", "Glob", "Grep", "TodoWrite", "WebSearch", "BashOutput"]);
-
-export function needsDecision(toolName: string | null, body: Record<string, unknown>): boolean {
-  if (!toolName) {
-    return false;
-  }
-  if (toolName === "AskUserQuestion") {
-    // 03-03 (ACT-02): AskUserQuestion always blocks on a real answer —
-    // unlike an ordinary tool-approval prompt, it is never skipped by
-    // `permission_mode` (Claude Code shows its own interactive picker for
-    // this tool regardless of mode), so it bypasses `holdsForPermissionMode`
-    // entirely.
-    return true;
-  }
-  if (NO_DECISION_NEEDED_TOOLS.has(toolName)) {
-    return false;
-  }
-  return holdsForPermissionMode(body.permission_mode);
-}
-
-/**
- * Gates the hold on the session's current permission mode (D-fix, live
- * Phase 3 test): Claude Code only shows an interactive permission prompt in
- * `default` mode (docs.claude.code `/permission-modes`: "default... prompts
- * for user permission on first use of each tool"; `/hooks` "Common input
- * fields" confirms every hook event — including `PreToolUse` — carries a
- * `permission_mode` field alongside `session_id`/`cwd`). In `acceptEdits`,
- * `bypassPermissions`, `plan`, `auto`, and `dontAsk` modes the tool call
- * would never have prompted, so holding here would incorrectly stall a
- * session running with e.g. `--dangerously-skip-permissions`
- * (`bypassPermissions`) — every single tool call would otherwise show a
- * false "waiting for permission" card. `plan` mode additionally gets its own
- * 3-way `PermissionRequest`/`ExitPlanMode` contract in plan 03-05 — this
- * gate simply excludes it from 03-01's binary approve/deny hold, it does
- * not implement 03-05's behavior.
- *
- * A missing/non-string `permission_mode` (e.g. a Claude Code build that
- * predates the field) fails safe to the pre-existing hold behavior by
- * treating it the same as `"default"` — this is a deliberate fail-safe, not
- * a guess: we hold (as before this fix) rather than silently stop gating
- * permission prompts we can't classify.
- *
- * KNOWN LIMITATION (left as-is, not addressed by this fix): even in
- * `default` mode, a tool/command the user has already allow-listed (via
- * `allowedTools`, a project rule, or a prior "always allow" choice) would
- * still be held here, because this gate only inspects `permission_mode` —
- * it has no visibility into Claude Code's own allow-list evaluation, which
- * happens downstream of this hook. That case would show a hold the native
- * flow would have skipped; out of scope for this bug-fix pass.
- */
-function holdsForPermissionMode(permissionMode: unknown): boolean {
-  return permissionMode === undefined || permissionMode === null || permissionMode === "default";
+export function needsDecision(toolName: string | null, _body: Record<string, unknown>): boolean {
+  return toolName === "AskUserQuestion";
 }
 
 export function makePreToolUseHandler(db: DatabaseType) {

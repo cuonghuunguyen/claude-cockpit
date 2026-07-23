@@ -39,7 +39,7 @@
     Shell command that launches the Cockpit daemon, INSIDE the WSL distro's
     own filesystem. Since Phase 2.1's D-07 retirement, this is the Node
     daemon entrypoint (e.g.
-    "node /home/<user>/claude-cockpit/daemon-ts/dist/main.js"), NOT the
+    "node /home/<user>/claude-cockpit/daemon/dist/main.js"), NOT the
     retired Rust binary path. Never a /mnt/c/... path — see RESEARCH.md
     Pitfall D (unrelated to this script, but the same WSL-native-filesystem
     discipline applies to the daemon's working directory/DB too).
@@ -72,12 +72,12 @@
 
 .EXAMPLE
     # Default: run only when logged on (no stored credential) — Ubuntu distro
-    .\register-task-scheduler.ps1 -DaemonPath "node /home/dev/claude-cockpit/daemon-ts/dist/main.js"
+    .\register-task-scheduler.ps1 -DaemonPath "node /home/dev/claude-cockpit/daemon/dist/main.js"
 
 .EXAMPLE
     # Opt-in: run whether logged on or not (daemon up before first interactive logon)
     $cred = Get-Credential -UserName $env:USERNAME
-    .\register-task-scheduler.ps1 -DaemonPath "node /home/dev/claude-cockpit/daemon-ts/dist/main.js" `
+    .\register-task-scheduler.ps1 -DaemonPath "node /home/dev/claude-cockpit/daemon/dist/main.js" `
         -RunWhetherLoggedOnOrNot -UserId $cred.UserName -Password $cred.Password
 #>
 

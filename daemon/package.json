@@ -1,5 +1,5 @@
 {
-  "name": "cockpit-daemon-ts",
+  "name": "cockpit-daemon",
   "version": "0.1.0",
   "private": true,
   "description": "Claude Cockpit WSL-hosted local service (Node/TypeScript re-platform of the Rust daemon, Phase 2.1).",

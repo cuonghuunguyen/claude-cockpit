@@ -60,7 +60,7 @@ export type DecisionKind = "permission" | "ask-user-question" | "plan-mode";
  * `<assumption_delta_decision>` (03-01-PLAN.md): a single discriminated
  * union rather than three parallel ad-hoc code paths. The daemon owns the
  * single mapping `Decision + PendingDecision.kind -> hookSpecificOutput JSON`
- * (`buildHookDecisionOutput` in `daemon-ts/src/decisions.ts`). 03-01
+ * (`buildHookDecisionOutput` in `daemon/src/decisions.ts`). 03-01
  * implements the `approve`/`deny` variants end-to-end; 03-03 implements
  * `answer` (`AskUserQuestion`, ACT-02); the `plan-*` variants remain
  * reserved for 03-05.
@@ -146,7 +146,7 @@ export interface Session {
   /**
    * The pending ask this session is currently holding open (FND-04/ACT-01),
    * or `null` when nothing is held. Derived server-side from `status` +
-   * `currentTool` — never persisted separately (daemon-ts/src/store.ts's
+   * `currentTool` — never persisted separately (daemon/src/store.ts's
    * `getSessionApi`).
    */
   pendingDecision: PendingDecision | null;

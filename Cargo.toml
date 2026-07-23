@@ -2,16 +2,16 @@
 resolver = "2"
 members = ["app/src-tauri"]
 
-# NOTE: The Rust daemon crate (formerly "daemon") was retired in Phase 2.1
-# (D-07) and archived at `daemon-rust-archived/` — the canonical daemon is
-# now the Node/TypeScript implementation at `daemon-ts/` (build via
-# `npm --prefix daemon-ts run build`, run via `node daemon-ts/dist/main.js`;
-# see .planning/config.json workflow.build_command/test_command).
+# NOTE: The original Rust daemon crate was retired in Phase 2.1 (D-07) —
+# the canonical daemon is now the Node/TypeScript implementation at
+# `daemon/` (build via `npm --prefix daemon run build`, run via
+# `node daemon/dist/main.js`; see .planning/config.json
+# workflow.build_command/test_command).
 #
 # `app/src-tauri` requires Linux WebKit/GTK dev libraries to compile. On a
 # WSL/Ubuntu dev machine without those libraries installed, build the Node
 # daemon alone instead:
-#   npm --prefix daemon-ts run build
+#   npm --prefix daemon run build
 # A bare `cargo build` at the workspace root will attempt to compile
 # `app/src-tauri` and fail with missing-library errors on such a machine.
 # The Tauri app is compiled and visually verified on the Windows side.

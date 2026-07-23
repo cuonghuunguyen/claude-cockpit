@@ -4,7 +4,7 @@
  * The Node `Promise`/`Map` analogue of what a retired-Rust-daemon design
  * would have needed a `tokio::oneshot`/`Mutex<HashMap<...>>` for — Node's
  * single-threaded event loop makes the mutex unnecessary. Shape mirrors
- * `daemon-ts/src/sse.ts`'s subscriber-registry discipline (register /
+ * `daemon/src/sse.ts`'s subscriber-registry discipline (register /
  * resolve-or-cleanup / "a missing entry is always a safe no-op, never a
  * throw"). See 03-RESEARCH.md Pattern 2.
  *
@@ -37,7 +37,7 @@ interface RegistryEntry {
   /**
    * The ORIGINAL `tool_input.questions` array recorded at hold-begin, kept
    * only for `kind === "ask-user-question"` — the daemon needs this both to
-   * render the card's options (`daemon-ts/src/store.ts::derivePendingDecision`)
+   * render the card's options (`daemon/src/store.ts::derivePendingDecision`)
    * and, at answer time, to validate submitted labels against the recorded
    * options and to echo the array back unchanged in `updatedInput`
    * (03-RESEARCH.md Pitfall 5: never omit the echoed `questions` array).
@@ -182,7 +182,7 @@ export function getPendingDecisionKind(sessionId: string): DecisionKind | null {
  * The recorded `tool_input.questions` array for `sessionId`'s pending
  * `ask-user-question` hold, or `null` when there is no pending hold (or it
  * wasn't registered with any questions — a malformed `AskUserQuestion`
- * payload). Used both by `daemon-ts/src/store.ts::derivePendingDecision`
+ * payload). Used both by `daemon/src/store.ts::derivePendingDecision`
  * (to render the card's options) and by `buildAskUserQuestionOutput` below
  * (to validate/echo at answer time).
  */
@@ -193,7 +193,7 @@ export function getPendingDecisionQuestions(sessionId: string): AskUserQuestionQ
 /**
  * Length bound (Unicode code points) for a free-text deny reason, matching
  * the existing `condensedJsonSummary`/`condensedText` discipline
- * (`daemon-ts/src/store.ts`) of counting `Array.from(...).length` rather
+ * (`daemon/src/store.ts`) of counting `Array.from(...).length` rather
  * than raw UTF-16 `.length` (ACT-03 — never split a surrogate pair).
  */
 const MAX_REASON_CODE_POINTS = 200;
@@ -206,7 +206,7 @@ const MAX_REASON_CODE_POINTS = 200;
  * `<assumption_delta_decision>`. `sessionId` is required for the
  * `ask-user-question` branch (to look up the recorded `tool_input.questions`
  * this same registry retained at hold-begin — see {@link RegistryEntry});
- * the caller (`daemon-ts/src/routes.ts`'s decision route) MUST pass it
+ * the caller (`daemon/src/routes.ts`'s decision route) MUST pass it
  * before resolving/deleting the pending entry. `permission` and `plan-mode`
  * both emit the `PermissionRequest` `decision.behavior` shape (03-05,
  * D-14/D-16) — only `ask-user-question` keeps `hookEventName: "PreToolUse"`

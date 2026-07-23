@@ -99,13 +99,13 @@ async function main(): Promise<void> {
   // operators.
   const rehydrated = rehydrateActiveSessions(db);
   console.log(
-    `cockpit-daemon-ts rehydrated ${rehydrated.length} unresolved session(s) from a prior run`,
+    `cockpit-daemon rehydrated ${rehydrated.length} unresolved session(s) from a prior run`,
   );
 
   const app = buildApp(db, token);
 
   await app.listen({ host: "0.0.0.0", port: COCKPIT_PORT });
-  console.log(`cockpit-daemon-ts listening on 0.0.0.0:${COCKPIT_PORT}`);
+  console.log(`cockpit-daemon listening on 0.0.0.0:${COCKPIT_PORT}`);
 }
 
 // Only auto-start when this module is the process entrypoint (not when
@@ -113,7 +113,7 @@ async function main(): Promise<void> {
 const entry = process.argv[1] ?? "";
 if (entry.endsWith("main.js") || entry.endsWith("main.ts")) {
   main().catch((err) => {
-    console.error("cockpit-daemon-ts failed to start:", err);
+    console.error("cockpit-daemon failed to start:", err);
     process.exit(1);
   });
 }

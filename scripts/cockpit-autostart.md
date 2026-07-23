@@ -11,12 +11,12 @@ Run once, from an elevated or non-elevated Windows PowerShell session (task
 registration for the current user does not require elevation):
 
 ```powershell
-.\scripts\register-task-scheduler.ps1 -DaemonPath "node /home/<user>/claude-cockpit/daemon-ts/dist/main.js"
+.\scripts\register-task-scheduler.ps1 -DaemonPath "node /home/<user>/claude-cockpit/daemon/dist/main.js"
 ```
 
 (Since Phase 2.1's D-07 retirement, the daemon is the Node/TypeScript build at
-`daemon-ts/dist/main.js`, not the retired Rust `target/debug/cockpit-daemon`
-binary. Run `npm --prefix daemon-ts run build` inside WSL first so `dist/`
+`daemon/dist/main.js`, not the retired Rust `target/debug/cockpit-daemon`
+binary. Run `npm --prefix daemon run build` inside WSL first so `dist/`
 exists.)
 
 `-Distro` defaults to `$env:WSL_DISTRO_NAME` if that's set in your shell,
@@ -114,7 +114,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/home/<user>/.nvm/versions/node/v24.14.0/bin/node /home/<user>/claude-cockpit/daemon-ts/dist/main.js
+ExecStart=/home/<user>/.nvm/versions/node/v24.14.0/bin/node /home/<user>/claude-cockpit/daemon/dist/main.js
 Restart=on-failure
 RestartSec=2
 
@@ -129,7 +129,7 @@ systemd units don't source `nvm.sh`/shell rc files, so a bare `node` on
 shell where `nvm use 24` has run. The old `Environment=RUST_LOG=info` line
 is Rust-specific and has been removed — it would be a harmless no-op env
 var for the Node process if left in place, but there's nothing in
-daemon-ts that reads it.)
+daemon that reads it.)
 
 ```bash
 sudo systemctl enable --now cockpit-daemon.service

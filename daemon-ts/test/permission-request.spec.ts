@@ -400,6 +400,60 @@ describe("wildcard PermissionRequest hold (POST /hooks/permission-request, resol
     expect([404, 409]).toContain(noHold.status);
   });
 
+  it("CR-02: dismissing a held permission-kind decision resets status off waiting-permission so GET /sessions never serves a stale card", async () => {
+    await startSession("cr02-dismiss-permission");
+
+    const held = sendNow(
+      auth(supertest(app.server).post("/hooks/permission-request")).send({
+        session_id: "cr02-dismiss-permission",
+        tool_name: "Bash",
+        tool_input: { command: "echo cr02" },
+      }),
+    );
+    await tick();
+    expect(hasPendingDecision("cr02-dismiss-permission")).toBe(true);
+
+    const dismissRes = await auth(supertest(app.server).post("/sessions/cr02-dismiss-permission/dismiss"));
+    expect(dismissRes.status).toBe(200);
+
+    const after = await auth(supertest(app.server).get("/sessions"));
+    const row = (
+      after.body as Array<{ sessionId: string; status: string; pendingDecision: unknown }>
+    ).find((s) => s.sessionId === "cr02-dismiss-permission");
+    expect(row).toBeDefined();
+    expect(row?.pendingDecision).toBeNull();
+    expect(row?.status).not.toBe("waiting-permission");
+
+    await held;
+  });
+
+  it("CR-02: dismissing a held plan-mode-kind decision resets status off waiting-permission so GET /sessions never serves a stale card", async () => {
+    await startSession("cr02-dismiss-plan-mode");
+
+    const held = sendNow(
+      auth(supertest(app.server).post("/hooks/permission-request")).send({
+        session_id: "cr02-dismiss-plan-mode",
+        tool_name: "ExitPlanMode",
+        tool_input: { plan: "do the thing" },
+      }),
+    );
+    await tick();
+    expect(hasPendingDecision("cr02-dismiss-plan-mode")).toBe(true);
+
+    const dismissRes = await auth(supertest(app.server).post("/sessions/cr02-dismiss-plan-mode/dismiss"));
+    expect(dismissRes.status).toBe(200);
+
+    const after = await auth(supertest(app.server).get("/sessions"));
+    const row = (
+      after.body as Array<{ sessionId: string; status: string; pendingDecision: unknown }>
+    ).find((s) => s.sessionId === "cr02-dismiss-plan-mode");
+    expect(row).toBeDefined();
+    expect(row?.pendingDecision).toBeNull();
+    expect(row?.status).not.toBe("waiting-permission");
+
+    await held;
+  });
+
   it("orphaned hold: a 404 decision POST after a PermissionRequest timeout reconciles the stored status off waiting-permission", async () => {
     __setDefaultTimeoutMsForTests(30);
     await startSession("pr-orphan-hold");

@@ -207,9 +207,10 @@ const MAX_REASON_CODE_POINTS = 200;
  * `ask-user-question` branch (to look up the recorded `tool_input.questions`
  * this same registry retained at hold-begin — see {@link RegistryEntry});
  * the caller (`daemon-ts/src/routes.ts`'s decision route) MUST pass it
- * before resolving/deleting the pending entry. `plan-mode` remains an
- * exhaustive switch arm that throws on the unimplemented kind; 03-05 fills
- * it in.
+ * before resolving/deleting the pending entry. `permission` and `plan-mode`
+ * both emit the `PermissionRequest` `decision.behavior` shape (03-05,
+ * D-14/D-16) — only `ask-user-question` keeps `hookEventName: "PreToolUse"`
+ * (03-03, D-15, untouched by this migration).
  */
 export function buildHookDecisionOutput(kind: DecisionKind, decision: Decision, sessionId?: string): unknown {
   switch (kind) {
@@ -218,7 +219,7 @@ export function buildHookDecisionOutput(kind: DecisionKind, decision: Decision, 
     case "ask-user-question":
       return buildAskUserQuestionOutput(decision, sessionId);
     case "plan-mode":
-      throw new Error("buildHookDecisionOutput: 'plan-mode' is implemented in a later plan (03-05)");
+      return buildPlanModeOutput(decision);
   }
 }
 
@@ -267,32 +268,86 @@ function buildAskUserQuestionOutput(decision: Decision, sessionId?: string): unk
 }
 
 /**
- * `permission` kind (ACT-01/ACT-03): approve -> `permissionDecision: "allow"`;
- * deny -> `"deny"` plus `permissionDecisionReason`, OMITTING the reason key
- * entirely when the reason is absent or whitespace-only (never an
- * empty-string reason shown to the session as feedback).
+ * `permission` kind (ACT-01/ACT-03; reworked D-14/03-05 to the
+ * `PermissionRequest` `decision.behavior` shape): approve ->
+ * `decision:{behavior:"allow"}`; deny -> `decision:{behavior:"deny"}` plus
+ * `message`, OMITTING the `message` key entirely when the reason is absent
+ * or whitespace-only (never an empty-string reason shown to the session as
+ * feedback). `hookEventName` is now `"PermissionRequest"` (the general case
+ * no longer resolves via `PreToolUse` — see the module-level
+ * `<assumption_delta_decision>` in 03-05-PLAN.md).
  */
 function buildPermissionOutput(decision: Decision): unknown {
   if (decision.type === "approve") {
     return {
       hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "allow",
+        hookEventName: "PermissionRequest",
+        decision: { behavior: "allow" },
       },
     };
   }
   if (decision.type === "deny") {
-    const hookSpecificOutput: Record<string, unknown> = {
-      hookEventName: "PreToolUse",
-      permissionDecision: "deny",
-    };
+    const decisionOutput: Record<string, unknown> = { behavior: "deny" };
     const reason = decision.reason;
     if (typeof reason === "string" && reason.trim() !== "") {
       // Opaque, code-point-length-bounded UTF-8 string, passed through
       // verbatim and never interpreted/executed (ACT-03, T-03-04).
-      hookSpecificOutput.permissionDecisionReason = Array.from(reason).slice(0, MAX_REASON_CODE_POINTS).join("");
+      decisionOutput.message = Array.from(reason).slice(0, MAX_REASON_CODE_POINTS).join("");
     }
-    return { hookSpecificOutput };
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: decisionOutput,
+      },
+    };
   }
   throw new Error(`buildHookDecisionOutput: Decision.type "${decision.type}" is not valid for kind "permission"`);
+}
+
+/**
+ * `plan-mode` kind (ACT-02, D-16, 03-RESEARCH.md Pattern 4): the
+ * `ExitPlanMode`-triggered 3-way `PermissionRequest` contract. `plan-allow`
+ * ("Yes") -> `decision:{behavior:"allow"}`; `plan-allow-accept-edits` ("Yes,
+ * and auto-accept edits for the rest of this session") ->
+ * `decision:{behavior:"allow", updatedPermissions:[{type:"setMode",
+ * mode:"acceptEdits", destination:"session"}]}` — a real, native,
+ * session-scoped Claude Code mode change requiring zero Cockpit-side
+ * bookkeeping; `plan-deny` ("No") -> `decision:{behavior:"deny"}` plus
+ * `message`, OMITTING the key entirely when blank (mirrors `permission`'s
+ * deny-message discipline above).
+ */
+function buildPlanModeOutput(decision: Decision): unknown {
+  if (decision.type === "plan-allow") {
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: { behavior: "allow" },
+      },
+    };
+  }
+  if (decision.type === "plan-allow-accept-edits") {
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: {
+          behavior: "allow",
+          updatedPermissions: [{ type: "setMode", mode: "acceptEdits", destination: "session" }],
+        },
+      },
+    };
+  }
+  if (decision.type === "plan-deny") {
+    const decisionOutput: Record<string, unknown> = { behavior: "deny" };
+    const message = decision.message;
+    if (typeof message === "string" && message.trim() !== "") {
+      decisionOutput.message = Array.from(message).slice(0, MAX_REASON_CODE_POINTS).join("");
+    }
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: decisionOutput,
+      },
+    };
+  }
+  throw new Error(`buildHookDecisionOutput: Decision.type "${decision.type}" is not valid for kind "plan-mode"`);
 }

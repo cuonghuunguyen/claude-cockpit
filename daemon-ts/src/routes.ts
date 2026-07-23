@@ -189,6 +189,15 @@ export function registerRoutes(app: FastifyInstance, db: DatabaseType, token: st
         return;
       }
 
+      // CR-01 (03-REVIEW.md): mirror the 404 orphan-reconciliation branch's
+      // own reset above — reset the persisted status off `waiting-permission`
+      // the moment the decision resolves, BEFORE reading it back for the
+      // publish below. Without this, the SQL-persisted status stays
+      // `waiting-permission` until the next real hook event arrives, so
+      // `derivePendingDecision` re-synthesizes a (now-wrong) fallback shape
+      // for the emitted SSE frame and any `GET /sessions` in between.
+      updateSessionStatus(db, sessionId, "running", null);
+
       publishSessionUpdate(getSessionApi(db, sessionId));
       reply.code(200).send();
     },

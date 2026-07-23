@@ -227,4 +227,35 @@ describe("AskUserQuestion answer-injection (held PreToolUse resolved by POST /se
     const heldRes = await held;
     expect(heldRes.body).toEqual({});
   });
+
+  it("resolving an ask-user-question decision immediately clears the pendingDecision — GET /sessions never serves a stale permission-shaped card (CR-01)", async () => {
+    await startSession("aq-cr01-reset");
+
+    const held = sendNow(
+      auth(supertest(app.server).post("/hooks/pre-tool-use")).send({
+        session_id: "aq-cr01-reset",
+        tool_name: "AskUserQuestion",
+        tool_input: SINGLE_QUESTION,
+      }),
+    );
+    await tick();
+
+    const decisionRes = await auth(supertest(app.server).post("/sessions/aq-cr01-reset/decision")).send({
+      type: "answer",
+      answers: ["Fast"],
+    });
+    expect(decisionRes.status).toBe(200);
+
+    const after = await auth(supertest(app.server).get("/sessions"));
+    const row = (
+      after.body as Array<{
+        sessionId: string;
+        pendingDecision: { kind: string } | null;
+      }>
+    ).find((s) => s.sessionId === "aq-cr01-reset");
+    expect(row).toBeDefined();
+    expect(row?.pendingDecision).toBeNull();
+
+    await held;
+  });
 });

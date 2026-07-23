@@ -169,13 +169,21 @@ export interface SessionApi {
  * decision route's 404 handler (`routes.ts`) reconciles back off
  * `waiting-permission` on the next click, so preserving the pre-03-03
  * fallback shape here keeps that existing 03-01 reconciliation test passing
- * unchanged.
+ * unchanged. The one exception (CR-01, 03-REVIEW.md): when `currentTool` is
+ * `"AskUserQuestion"`, there is no `currentTool`-based re-derivation path
+ * (unlike `plan-mode`'s `ExitPlanMode` case) to reconstruct the original
+ * questions/options — so a registry miss here returns `null` (the card
+ * clears) instead of fabricating a wrong-shape `"permission"` Approve/Deny
+ * card the user never intended to act on. Genuine orphaned permission holds
+ * (registry miss with a normal tool name, e.g. `"Bash"`) still fall back to
+ * the `"permission"` shape for the existing reconciliation path.
  */
 function derivePendingDecision(row: SessionRow): PendingDecision | null {
   if (row.status !== "waiting-permission") {
     return null;
   }
-  const kind = getPendingDecisionKind(row.sessionId) ?? "permission";
+  const registeredKind = getPendingDecisionKind(row.sessionId);
+  const kind = registeredKind ?? "permission";
   if (kind === "ask-user-question") {
     const questions = getPendingDecisionQuestions(row.sessionId);
     const firstQuestion = questions?.[0];
@@ -207,6 +215,12 @@ function derivePendingDecision(row: SessionRow): PendingDecision | null {
         { label: "No", decision: { type: "plan-deny" }, revealReasonOnSelect: true },
       ],
     };
+  }
+  if (registeredKind == null && row.currentTool === "AskUserQuestion") {
+    // CR-01: an orphaned ask-user-question hold has no re-derivation path
+    // (unlike ExitPlanMode's plan-mode branch above) — return null rather
+    // than fabricating a wrong-kind permission Approve/Deny card.
+    return null;
   }
   return {
     kind: "permission",

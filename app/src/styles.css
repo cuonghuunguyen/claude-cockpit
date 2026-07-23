@@ -248,6 +248,90 @@
   color: #b3261e;
 }
 
+/* Task 3 (03-03, D-11): generic option-button renderer for any
+   non-"permission" pending decision (today: ask-user-question; ready for
+   plan-mode's reuse in 03-05) — data-driven over `pendingDecision.options`,
+   not hardcoded to any one tool. */
+.session-card-option-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-weight: 400;
+  font-size: 0.85rem;
+}
+
+.session-card-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  font-size: 0.82rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: 6px;
+  border: 1px solid #d8d8d8;
+  background: #ffffff;
+  cursor: pointer;
+  text-align: left;
+}
+
+.session-card-option:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.session-card-option-selected {
+  border-color: #6b8fd6 !important;
+  background: #eef2fb;
+}
+
+.session-card-option-description {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: #6b6b6b;
+}
+
+.session-card-option-confirm {
+  font-size: 0.82rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: 6px;
+  border: 1px solid #9fd8b8;
+  background: #ffffff;
+  color: #16693c;
+  cursor: pointer;
+}
+
+.session-card-option-confirm:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Reason box revealed for an option with revealReasonOnSelect (D-09
+   pattern, generalized) — mirrors .session-card-deny-reveal. */
+.session-card-option-reason-reveal {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.session-card-option-reason {
+  font-size: 0.82rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid #d8d8d8;
+  min-width: 10rem;
+}
+
+.session-card-option-reason-confirm {
+  font-size: 0.82rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: 6px;
+  border: 1px solid #d8d8d8;
+  background: #ffffff;
+  cursor: pointer;
+}
+
 .session-card-meta {
   display: flex;
   flex-wrap: wrap;
@@ -396,6 +480,28 @@
 
   .session-card-decision-detail {
     color: #d8c68a;
+  }
+
+  .session-card-option {
+    background: #2a2d36;
+    border-color: #3a3d45;
+    color: #d6dbe8;
+  }
+
+  .session-card-option-selected {
+    border-color: #8fabe8 !important;
+    background: #2f3b57;
+  }
+
+  .session-card-option-description {
+    color: #9a9ea8;
+  }
+
+  .session-card-option-confirm,
+  .session-card-option-reason-confirm {
+    background: #2a2d36;
+    border-color: #3a3d45;
+    color: #d6dbe8;
   }
 
   .status-badge {

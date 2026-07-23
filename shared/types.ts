@@ -60,14 +60,15 @@ export type DecisionKind = "permission" | "ask-user-question" | "plan-mode";
  * `<assumption_delta_decision>` (03-01-PLAN.md): a single discriminated
  * union rather than three parallel ad-hoc code paths. The daemon owns the
  * single mapping `Decision + PendingDecision.kind -> hookSpecificOutput JSON`
- * (`buildHookDecisionOutput` in `daemon-ts/src/decisions.ts`). This plan
- * (03-01) implements only the `approve`/`deny` variants end-to-end; the
- * remaining variants are reserved for 03-03/03-05.
+ * (`buildHookDecisionOutput` in `daemon-ts/src/decisions.ts`). 03-01
+ * implements the `approve`/`deny` variants end-to-end; 03-03 implements
+ * `answer` (`AskUserQuestion`, ACT-02); the `plan-*` variants remain
+ * reserved for 03-05.
  */
 export type Decision =
   | { type: "approve" }
   | { type: "deny"; reason?: string }
-  | { type: "answer"; labels: string[] }
+  | { type: "answer"; answers: string[] }
   | { type: "plan-allow" }
   | { type: "plan-allow-accept-edits" }
   | { type: "plan-deny"; message?: string };
@@ -99,6 +100,15 @@ export interface PendingDecision {
   toolInputSummary: string | null;
   prompt: string;
   options: PendingOption[];
+  /**
+   * `true` when this `ask-user-question` decision's underlying question
+   * accepts multiple selected options (03-03, ACT-02) — the card
+   * accumulates clicked options and submits a single confirmed `answer`
+   * carrying all selected labels, rather than submitting on the first
+   * click. `undefined`/absent for `permission`-kind decisions (always
+   * single-select Approve/Deny).
+   */
+  multiSelect?: boolean;
 }
 
 /**

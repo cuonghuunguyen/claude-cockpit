@@ -16,13 +16,86 @@
 
 import type { Decision, DecisionKind } from "../../shared/types.js";
 
+/** One selectable option of an `AskUserQuestion` question, as Claude's own `tool_input.questions[].options[]` shape (untyped/undocumented as a Cockpit wire type — internal to the daemon, never exposed via `shared/types.ts`). */
+export interface AskUserQuestionOption {
+  label: string;
+  description?: string;
+}
+
+/** One question of an `AskUserQuestion` call's `tool_input.questions` array (03-RESEARCH.md Pattern 3). */
+export interface AskUserQuestionQuestionInput {
+  question: string;
+  header?: string;
+  options: AskUserQuestionOption[];
+  multiSelect?: boolean;
+}
+
 interface RegistryEntry {
   resolve: (json: unknown) => void;
   timer: NodeJS.Timeout;
   kind: DecisionKind;
+  /**
+   * The ORIGINAL `tool_input.questions` array recorded at hold-begin, kept
+   * only for `kind === "ask-user-question"` — the daemon needs this both to
+   * render the card's options (`daemon-ts/src/store.ts::derivePendingDecision`)
+   * and, at answer time, to validate submitted labels against the recorded
+   * options and to echo the array back unchanged in `updatedInput`
+   * (03-RESEARCH.md Pitfall 5: never omit the echoed `questions` array).
+   */
+  questions?: AskUserQuestionQuestionInput[];
 }
 
 const pending = new Map<string, RegistryEntry>();
+
+/**
+ * Defensively parses `tool_input.questions` out of a raw, untrusted
+ * `PreToolUse` payload for `AskUserQuestion` (the payload originates from
+ * Claude Code's own tool call, but the daemon must not assume any field is
+ * present/well-typed). Returns `undefined` (never throws) when the shape
+ * doesn't match — the caller then registers the hold with no recorded
+ * questions, and any later answer attempt fails safely via
+ * `buildHookDecisionOutput`'s own guard.
+ */
+export function parseAskUserQuestionQuestions(toolInput: unknown): AskUserQuestionQuestionInput[] | undefined {
+  if (!toolInput || typeof toolInput !== "object") {
+    return undefined;
+  }
+  const rawQuestions = (toolInput as Record<string, unknown>).questions;
+  if (!Array.isArray(rawQuestions)) {
+    return undefined;
+  }
+  const parsed: AskUserQuestionQuestionInput[] = [];
+  for (const rawQuestion of rawQuestions) {
+    if (!rawQuestion || typeof rawQuestion !== "object") {
+      continue;
+    }
+    const q = rawQuestion as Record<string, unknown>;
+    if (typeof q.question !== "string" || !Array.isArray(q.options)) {
+      continue;
+    }
+    const options: AskUserQuestionOption[] = [];
+    for (const rawOption of q.options) {
+      if (!rawOption || typeof rawOption !== "object") {
+        continue;
+      }
+      const o = rawOption as Record<string, unknown>;
+      if (typeof o.label !== "string") {
+        continue;
+      }
+      options.push({
+        label: o.label,
+        description: typeof o.description === "string" ? o.description : undefined,
+      });
+    }
+    parsed.push({
+      question: q.question,
+      header: typeof q.header === "string" ? q.header : undefined,
+      options,
+      multiSelect: typeof q.multiSelect === "boolean" ? q.multiSelect : undefined,
+    });
+  }
+  return parsed.length > 0 ? parsed : undefined;
+}
 
 /** D-01/D-03: the "release to native prompt" payload — no decision at all. */
 const EMPTY_DECISION: Record<string, never> = {};
@@ -61,13 +134,14 @@ export function registerPendingDecision(
   kind: DecisionKind,
   onTimeout: () => unknown,
   timeoutMs: number = defaultTimeoutMs,
+  questions?: AskUserQuestionQuestionInput[],
 ): Promise<unknown> {
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       pending.delete(sessionId);
       resolve(onTimeout());
     }, timeoutMs);
-    pending.set(sessionId, { resolve, timer, kind });
+    pending.set(sessionId, { resolve, timer, kind, questions });
   });
 }
 
@@ -105,6 +179,18 @@ export function getPendingDecisionKind(sessionId: string): DecisionKind | null {
 }
 
 /**
+ * The recorded `tool_input.questions` array for `sessionId`'s pending
+ * `ask-user-question` hold, or `null` when there is no pending hold (or it
+ * wasn't registered with any questions — a malformed `AskUserQuestion`
+ * payload). Used both by `daemon-ts/src/store.ts::derivePendingDecision`
+ * (to render the card's options) and by `buildAskUserQuestionOutput` below
+ * (to validate/echo at answer time).
+ */
+export function getPendingDecisionQuestions(sessionId: string): AskUserQuestionQuestionInput[] | null {
+  return pending.get(sessionId)?.questions ?? null;
+}
+
+/**
  * Length bound (Unicode code points) for a free-text deny reason, matching
  * the existing `condensedJsonSummary`/`condensedText` discipline
  * (`daemon-ts/src/store.ts`) of counting `Array.from(...).length` rather
@@ -117,18 +203,67 @@ const MAX_REASON_CODE_POINTS = 200;
  * hook for a resolved {@link Decision}, given the {@link DecisionKind} the
  * hold was registered under. This is the ONE choke point every response
  * surface (card, toast) funnels through — see this phase's
- * `<assumption_delta_decision>`. `ask-user-question` and `plan-mode` are an
- * exhaustive switch that throws on unhandled kinds; 03-03/03-05 fill them in.
+ * `<assumption_delta_decision>`. `sessionId` is required for the
+ * `ask-user-question` branch (to look up the recorded `tool_input.questions`
+ * this same registry retained at hold-begin — see {@link RegistryEntry});
+ * the caller (`daemon-ts/src/routes.ts`'s decision route) MUST pass it
+ * before resolving/deleting the pending entry. `plan-mode` remains an
+ * exhaustive switch arm that throws on the unimplemented kind; 03-05 fills
+ * it in.
  */
-export function buildHookDecisionOutput(kind: DecisionKind, decision: Decision): unknown {
+export function buildHookDecisionOutput(kind: DecisionKind, decision: Decision, sessionId?: string): unknown {
   switch (kind) {
     case "permission":
       return buildPermissionOutput(decision);
     case "ask-user-question":
-      throw new Error("buildHookDecisionOutput: 'ask-user-question' is implemented in a later plan (03-03)");
+      return buildAskUserQuestionOutput(decision, sessionId);
     case "plan-mode":
       throw new Error("buildHookDecisionOutput: 'plan-mode' is implemented in a later plan (03-05)");
   }
+}
+
+/**
+ * `ask-user-question` kind (ACT-02, 03-RESEARCH.md Pattern 3): answers the
+ * FIRST recorded question only (matches this plan's `PendingDecision.options`
+ * scope — see `store.ts::derivePendingDecision`). Validates every submitted
+ * label against that question's recorded `options[].label` set (T-03-03 —
+ * an arbitrary/fabricated label is rejected, never forwarded upstream),
+ * comma-joins multiSelect selections into a single answer string, and
+ * ALWAYS echoes the complete original `questions` array back unchanged
+ * alongside the constructed `answers` map (Pitfall 5 — never assume
+ * `updatedInput` is shallow-merged over the original `tool_input`).
+ */
+function buildAskUserQuestionOutput(decision: Decision, sessionId?: string): unknown {
+  if (decision.type !== "answer") {
+    throw new Error(`buildHookDecisionOutput: Decision.type "${decision.type}" is not valid for kind "ask-user-question"`);
+  }
+  if (!sessionId) {
+    throw new Error("buildHookDecisionOutput: sessionId is required to build an ask-user-question decision");
+  }
+  const questions = getPendingDecisionQuestions(sessionId);
+  if (!questions || questions.length === 0) {
+    throw new Error("buildHookDecisionOutput: no recorded questions for this session's ask-user-question hold");
+  }
+  const firstQuestion = questions[0];
+  const validLabels = new Set(firstQuestion.options.map((option) => option.label));
+  for (const label of decision.answers) {
+    if (!validLabels.has(label)) {
+      throw new Error(
+        `buildHookDecisionOutput: "${label}" is not one of the recorded options for "${firstQuestion.question}"`,
+      );
+    }
+  }
+  const joinedAnswer = decision.answers.join(", ");
+  return {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "allow",
+      updatedInput: {
+        questions,
+        answers: { [firstQuestion.question]: joinedAnswer },
+      },
+    },
+  };
 }
 
 /**

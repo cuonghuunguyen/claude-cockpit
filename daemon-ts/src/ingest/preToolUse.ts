@@ -28,19 +28,20 @@ import { condensedJsonSummary, getSessionApi } from "../store.js";
 import { dispatchIngestEvent, publishSessionUpdate } from "./dispatch.js";
 import type { IngestEventRequest } from "./dispatch.js";
 import { beginPermissionHold } from "../sessionState.js";
-import { registerPendingDecision } from "../decisions.js";
+import { parseAskUserQuestionQuestions, registerPendingDecision } from "../decisions.js";
+import type { DecisionKind } from "../../../shared/types.js";
 
 /**
  * Conservative denylist (03-01 scope) of tools that never need an
  * interactive decision through this hold-open channel: read-only/inert
  * tools that never mutate state and are never gated by an interactive
- * permission prompt in practice. `AskUserQuestion` is explicitly excluded
- * here too — it gets its own answer-injection contract in a later plan
- * (03-03), not the binary approve/deny built in this plan. Everything else
- * arriving at `PreToolUse` is scoped conservatively as decision-requiring;
- * this is the walking skeleton of the whole phase's decision channel, not a
- * claim that every one of these tools would actually show a native
- * permission prompt.
+ * permission prompt in practice. `AskUserQuestion` is handled separately
+ * (see {@link needsDecision} below) — it always needs an answer regardless
+ * of `permission_mode`, so it is never checked against this set or the
+ * `permission_mode` gate. Everything else arriving at `PreToolUse` is
+ * scoped conservatively as decision-requiring; this is the walking
+ * skeleton of the whole phase's decision channel, not a claim that every
+ * one of these tools would actually show a native permission prompt.
  */
 const NO_DECISION_NEEDED_TOOLS = new Set(["Read", "Glob", "Grep", "TodoWrite", "WebSearch", "BashOutput"]);
 
@@ -49,7 +50,12 @@ export function needsDecision(toolName: string | null, body: Record<string, unkn
     return false;
   }
   if (toolName === "AskUserQuestion") {
-    return false; // 03-03 owns AskUserQuestion's answer-injection contract.
+    // 03-03 (ACT-02): AskUserQuestion always blocks on a real answer —
+    // unlike an ordinary tool-approval prompt, it is never skipped by
+    // `permission_mode` (Claude Code shows its own interactive picker for
+    // this tool regardless of mode), so it bypasses `holdsForPermissionMode`
+    // entirely.
+    return true;
   }
   if (NO_DECISION_NEEDED_TOOLS.has(toolName)) {
     return false;
@@ -131,7 +137,16 @@ export function makePreToolUseHandler(db: DatabaseType) {
       beginPermissionHold(db, sessionId, toolName, toolInputSummary);
       publishSessionUpdate(getSessionApi(db, sessionId));
 
-      const decisionJson = await registerPendingDecision(sessionId, "permission", () => ({}));
+      // 03-03 (ACT-02): AskUserQuestion registers its own decision kind,
+      // carrying the ORIGINAL tool_input.questions array on the pending
+      // entry (decisions.ts) — needed both to render the card's options and,
+      // at answer time, to validate/echo the answer (03-RESEARCH.md
+      // Pattern 3, Pitfall 5). Every other decision-requiring tool keeps
+      // 03-01's plain binary approve/deny "permission" kind.
+      const kind: DecisionKind = toolName === "AskUserQuestion" ? "ask-user-question" : "permission";
+      const questions = kind === "ask-user-question" ? parseAskUserQuestionQuestions(body.tool_input) : undefined;
+
+      const decisionJson = await registerPendingDecision(sessionId, kind, () => ({}), undefined, questions);
 
       reply.raw.writeHead(200, { "Content-Type": "application/json" });
       reply.raw.end(JSON.stringify(decisionJson));

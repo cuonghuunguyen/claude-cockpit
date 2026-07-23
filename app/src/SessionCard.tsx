@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Decision, PendingDecision, Session } from "../../shared/types";
+import type { Decision, PendingDecision, PendingOption, Session } from "../../shared/types";
 import { formatRelativeTime, pendingAskHeadline, statusLabel } from "./format";
 import { Timeline } from "./Timeline";
 
@@ -51,6 +51,50 @@ export function buildDecisionPayload(
   }
   const trimmed = reason?.trim();
   return trimmed ? { type: "deny", reason: trimmed } : { type: "deny" };
+}
+
+/**
+ * Pure toggle for accumulating a multiSelect `ask-user-question` answer
+ * (Task 3, D-11, ACT-02): adds `label` if not already selected, removes it
+ * if it is. Preserves click order (never re-sorts) so the eventual
+ * comma-joined server-side answer (`buildHookDecisionOutput`,
+ * `daemon-ts/src/decisions.ts`) reflects the order the user picked options
+ * in. Exported separately so it is directly unit-testable without
+ * rendering the component (mirrors `buildDecisionPayload` above).
+ */
+export function toggleSelectedLabel(selected: string[], label: string): string[] {
+  return selected.includes(label) ? selected.filter((l) => l !== label) : [...selected, label];
+}
+
+/**
+ * Builds the `Decision` a multiSelect confirm submits (Task 3, ACT-02): the
+ * accumulated `selectedLabels` become the `answer` variant's `answers`
+ * array — comma-joined server-side by `buildHookDecisionOutput`, never
+ * client-side (03-RESEARCH.md Pattern 3).
+ */
+export function buildAnswerDecision(labels: string[]): Decision {
+  return { type: "answer", answers: labels };
+}
+
+/**
+ * Merges a free-text reason into `decision`, for options that set
+ * `revealReasonOnSelect` (D-09's reason-box pattern, generalized here so
+ * the generic option renderer is ready for plan-mode's "No" option in
+ * 03-05). Only the `deny`/`plan-deny` variants carry a free-text field
+ * (`reason`/`message` respectively, never the same key) — every other
+ * `Decision` type is returned unchanged. No `ask-user-question` option sets
+ * `revealReasonOnSelect` today; this exists purely for forward
+ * compatibility with the generic renderer's stated reuse goal.
+ */
+export function decisionWithReason(decision: Decision, reason: string): Decision {
+  const trimmed = reason.trim();
+  if (decision.type === "deny") {
+    return trimmed ? { type: "deny", reason: trimmed } : { type: "deny" };
+  }
+  if (decision.type === "plan-deny") {
+    return trimmed ? { type: "plan-deny", message: trimmed } : { type: "plan-deny" };
+  }
+  return decision;
 }
 
 /**
@@ -145,9 +189,19 @@ export function SessionCard({
   // from the fresh prop.
   const [responding, setResponding] = useState(false);
   const [respondError, setRespondError] = useState<string | null>(null);
-  const [resolved, setResolved] = useState<"approved" | "denied" | null>(null);
+  const [resolved, setResolved] = useState<"approved" | "denied" | "answered" | null>(null);
   const [denyRevealed, setDenyRevealed] = useState(false);
   const [denyReasonText, setDenyReasonText] = useState("");
+
+  // Generic option-button state (Task 3, ACT-02/D-11): reused by any
+  // non-"permission" pendingDecision kind (today: ask-user-question; ready
+  // for plan-mode's reuse in 03-05). `selectedLabels` accumulates clicks for
+  // a multiSelect question before a single Confirm submission;
+  // `optionReasonOption` mirrors the permission kind's deny-reveal pattern
+  // for any option that sets `revealReasonOnSelect`.
+  const [selectedLabels, setSelectedLabels] = useState<string[]>([]);
+  const [optionReasonOption, setOptionReasonOption] = useState<PendingOption | null>(null);
+  const [optionReasonText, setOptionReasonText] = useState("");
 
   useEffect(() => {
     if (highlighted) {
@@ -166,6 +220,9 @@ export function SessionCard({
       setDenyRevealed(false);
       setDenyReasonText("");
       setRespondError(null);
+      setSelectedLabels([]);
+      setOptionReasonOption(null);
+      setOptionReasonText("");
     }
   }, [session.pendingDecision]);
 
@@ -177,12 +234,22 @@ export function SessionCard({
   const displayHeadline = isResolved
     ? resolved === "approved"
       ? "Approved — unblocking…"
-      : "Denied"
+      : resolved === "denied"
+        ? "Denied"
+        : "Answered — continuing…"
     : headline;
   const showDecisionControls =
     !historical && !isResolved && session.pendingDecision?.kind === "permission";
   const decisionDetail =
     !historical && !isResolved ? decisionDetailText(session.pendingDecision) : null;
+  // Task 3 (D-11): generic option renderer for any non-"permission" pending
+  // decision — today only "ask-user-question" (03-03), ready for
+  // plan-mode's reuse in 03-05 without needing a kind-specific check here.
+  const showGenericOptions =
+    !historical &&
+    !isResolved &&
+    session.pendingDecision !== null &&
+    session.pendingDecision.kind !== "permission";
 
   async function handleDismiss() {
     setDismissing(true);
@@ -243,6 +310,46 @@ export function SessionCard({
 
   function handleDeny(reason?: string) {
     void submitDecision("deny", reason);
+  }
+
+  /**
+   * Generic submit path for the Task 3 option renderer (any non-"permission"
+   * kind — today only `ask-user-question`): mirrors `submitDecision`'s
+   * loading/error/optimistic-resolved shape, but takes an already-built
+   * `Decision` (either an option's own carried `decision`, for single-select,
+   * or `buildAnswerDecision(selectedLabels)` on multiSelect confirm).
+   */
+  async function submitOptionDecision(decision: Decision) {
+    setResponding(true);
+    setRespondError(null);
+    try {
+      await invoke("submit_decision", { sessionId: session.sessionId, decision });
+      setResolved("answered");
+      setSelectedLabels([]);
+      setOptionReasonOption(null);
+      setOptionReasonText("");
+    } catch (err) {
+      console.error("cockpit: failed to submit answer decision", session.sessionId, err);
+      setRespondError("Could not submit — try again.");
+    } finally {
+      setResponding(false);
+    }
+  }
+
+  function handleOptionClick(option: PendingOption, multiSelect: boolean) {
+    if (option.revealReasonOnSelect) {
+      setOptionReasonOption(option);
+      return;
+    }
+    if (multiSelect) {
+      setSelectedLabels((prev) => toggleSelectedLabel(prev, option.label));
+      return;
+    }
+    void submitOptionDecision(option.decision);
+  }
+
+  function handleConfirmMultiSelect() {
+    void submitOptionDecision(buildAnswerDecision(selectedLabels));
   }
 
   return (
@@ -313,6 +420,67 @@ export function SessionCard({
                     disabled={responding}
                   >
                     Deny without reason
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+          {showGenericOptions && session.pendingDecision && (
+            <div className="session-card-option-controls">
+              {session.pendingDecision.options.map((option) => {
+                const isSelected = selectedLabels.includes(option.label);
+                return (
+                  <button
+                    key={option.label}
+                    type="button"
+                    className={
+                      "session-card-option" + (isSelected ? " session-card-option-selected" : "")
+                    }
+                    onClick={() =>
+                      handleOptionClick(option, Boolean(session.pendingDecision?.multiSelect))
+                    }
+                    disabled={responding}
+                  >
+                    {option.label}
+                    {option.description && (
+                      <span className="session-card-option-description">
+                        {option.description}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+              {session.pendingDecision.multiSelect && (
+                <button
+                  type="button"
+                  className="session-card-option-confirm"
+                  onClick={handleConfirmMultiSelect}
+                  disabled={responding || selectedLabels.length === 0}
+                >
+                  {responding ? "Submitting…" : "Confirm"}
+                </button>
+              )}
+              {optionReasonOption && (
+                <div className="session-card-option-reason-reveal">
+                  <input
+                    type="text"
+                    className="session-card-option-reason"
+                    placeholder="Reason (optional)"
+                    value={optionReasonText}
+                    onChange={(e) => setOptionReasonText(e.target.value)}
+                    disabled={responding}
+                  />
+                  <button
+                    type="button"
+                    className="session-card-option-reason-confirm"
+                    onClick={() =>
+                      void submitOptionDecision(
+                        decisionWithReason(optionReasonOption.decision, optionReasonText),
+                      )
+                    }
+                    disabled={responding}
+                  >
+                    Confirm
                   </button>
                 </div>
               )}

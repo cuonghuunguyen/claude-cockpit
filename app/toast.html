@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Claude Cockpit — Toast</title>
+    <!--
+      Actionable decision toast (NOT-02, 03-04-PLAN.md). A second,
+      independent webview entry — never index.html/main.tsx — mounted
+      inside the always-on-top, decorationless, no-focus-steal
+      `cockpit-toast` WebviewWindow (`app/src-tauri/src/toast_window.rs`).
+      Minimal inline styling only: styles.css is scoped to the main
+      dashboard window's file list, not this plan's declared file scope.
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        color: #1a1a1a;
+      }
+      #root {
+        height: 100vh;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/ToastWindow.tsx"></script>
+  </body>
+</html>

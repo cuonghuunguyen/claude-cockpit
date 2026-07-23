@@ -275,6 +275,19 @@ fn maybe_fire_notification(app: &AppHandle, value: &Value) {
 /// `SESSION_EVENT_NAME` stream (every window receives Tauri's global
 /// `emit`) and closes itself once its tracked session's `pendingDecision`
 /// goes `null` — no Rust-side close-triggering logic is needed.
+/// Pure kind-gate helper for [`maybe_spawn_toast`] (CR-03): `true` only when
+/// `value.pendingDecision.kind == "permission"`. `false` for a null
+/// `pendingDecision`, any other kind (`ask-user-question`, `plan-mode`), or
+/// a malformed/missing shape. Extracted as a standalone `fn` so it can be
+/// unit-tested independent of the `AppHandle`/`emit` side effects below.
+fn is_permission_decision(value: &Value) -> bool {
+    value
+        .get("pendingDecision")
+        .and_then(|v| v.get("kind"))
+        .and_then(Value::as_str)
+        == Some("permission")
+}
+
 fn maybe_spawn_toast(app: &AppHandle, value: &Value) {
     let (Some(session_id), Some(status)) = (
         value.get("sessionId").and_then(Value::as_str),
@@ -288,11 +301,14 @@ fn maybe_spawn_toast(app: &AppHandle, value: &Value) {
         return;
     }
 
-    let has_pending_decision = value
-        .get("pendingDecision")
-        .map(|v| !v.is_null())
-        .unwrap_or(false);
-    if !has_pending_decision {
+    // CR-03 (03-VERIFICATION.md): gate the spawn on kind === "permission",
+    // not merely "pendingDecision is non-null" -- ToastWindow.tsx
+    // (app/src/ToastWindow.tsx) renders ONLY the permission kind (returns
+    // null for ask-user-question/plan-mode), so spawning a real
+    // WebviewWindow for any other kind previously produced an invisible,
+    // frameless, non-closable ghost window. Mirrors ToastWindow.tsx's own
+    // `kind === "permission"` render guard.
+    if !is_permission_decision(value) {
         return;
     }
 
@@ -691,5 +707,40 @@ mod notification_tests {
         for _ in 0..5 {
             assert!(!should_notify(&state, "s1", "done"));
         }
+    }
+}
+
+#[cfg(test)]
+mod toast_spawn_gate_tests {
+    use super::*;
+
+    #[test]
+    fn true_for_permission_kind() {
+        let value = serde_json::json!({ "pendingDecision": { "kind": "permission" } });
+        assert!(is_permission_decision(&value));
+    }
+
+    #[test]
+    fn false_for_ask_user_question_kind() {
+        let value = serde_json::json!({ "pendingDecision": { "kind": "ask-user-question" } });
+        assert!(!is_permission_decision(&value));
+    }
+
+    #[test]
+    fn false_for_plan_mode_kind() {
+        let value = serde_json::json!({ "pendingDecision": { "kind": "plan-mode" } });
+        assert!(!is_permission_decision(&value));
+    }
+
+    #[test]
+    fn false_for_null_pending_decision() {
+        let value = serde_json::json!({ "pendingDecision": null });
+        assert!(!is_permission_decision(&value));
+    }
+
+    #[test]
+    fn false_for_missing_pending_decision() {
+        let value = serde_json::json!({ "sessionId": "s1", "status": "running" });
+        assert!(!is_permission_decision(&value));
     }
 }

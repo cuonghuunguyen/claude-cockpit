@@ -126,6 +126,16 @@ export function registerRoutes(app: FastifyInstance, db: DatabaseType, token: st
         return;
       }
       releasePendingDecisionOnDismiss(req.params.id);
+      // CR-02 (03-VERIFICATION.md): mirror the CR-01 fix already on the
+      // sibling `/decision` route (~line 199 above) -- reset the persisted
+      // status off `waiting-permission` on dismiss, BEFORE the publish
+      // below. `dismissSession` only sets `dismissed_at`; without this the
+      // SQL-persisted status stays `waiting-permission` so
+      // `derivePendingDecision` keeps re-synthesizing a stale-looking
+      // Approve/Deny (or plan-mode) card for the very next `GET /sessions`.
+      if (row.status === "waiting-permission") {
+        updateSessionStatus(db, req.params.id, "running", null);
+      }
       publishSessionUpdate(getSessionApi(db, req.params.id));
       reply.code(200).send();
     },

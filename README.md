@@ -6,11 +6,10 @@ them to a lightweight local service, and surfaces the sessions that need
 your attention in a single queue — so you never have to poll a terminal to
 discover an agent has been stuck.
 
-See `.planning/PROJECT.md` for the full product context and
-`.planning/phases/01-foundation-live-session-dashboard/SKELETON.md` for the
-architectural contract this repo implements.
+## Architecture
 
-## Locked Architecture (do not re-litigate without a phase-level decision)
+These are fixed decisions, not defaults — each one exists because the
+alternative broke on WSL, on Windows, or on both.
 
 | Constant | Value | Why |
 |---|---|---|
